@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import * as ort from 'onnxruntime-web'
-import { loadModel, getSession } from './utils/yolo'
-
+//import * as ort from 'onnxruntime-web'
+//import { loadModel, getSession } from './utils/yolo'
+import { loadModel } from './utils/yolo'
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const imageRef = useRef<HTMLImageElement | null>(null)
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  const animationRef = useRef<number | null>(null)
 
   const [selectedFile, setSelectedFile] = useState('')
   const [previewURL, setPreviewURL] = useState('')
@@ -17,6 +21,7 @@ function App() {
 
   const [modelReady, setModelReady] = useState(false)
 
+ 
   useEffect(() => {
     const initModel = async () => {
       await loadModel()
@@ -27,6 +32,14 @@ function App() {
     }
 
     initModel()
+  }, [])
+
+  useEffect(() => {
+  return () => {
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current)
+    }
+  }
   }, [])
 
   const handleUploadClick = () => {
@@ -50,68 +63,85 @@ function App() {
   }
 
   const handleModelTest = async () => {
-    if (!imageRef.current) {
-      alert('Primero sube una imagen')
+  if (fileType.startsWith('image')) {
+    runImageDetection()
+    return
+  }
 
+  if (fileType.startsWith('video')) {
+    runVideoDetection()
+    return
+  }
+
+  alert('Selecciona una imagen o video')
+}
+const runImageDetection = async () => {
+  if (!imageRef.current) return
+
+  drawFakeDetection()
+}
+
+const runVideoDetection = async () => {
+  if (!videoRef.current) return
+
+  const video = videoRef.current
+
+  video.play()
+
+  const processFrame = () => {
+    if (video.paused || video.ended) {
       return
     }
 
-    try {
+    drawVideoDetection()
+
+    animationRef.current =
+      requestAnimationFrame(processFrame)
+  }
+
+  processFrame()
+}
+
+const drawVideoDetection = () => {
+  const video = videoRef.current
+
+  const canvas = canvasRef.current
+
+  if (!video || !canvas) return
+
+  canvas.width = video.videoWidth
+  canvas.height = video.videoHeight
+
+  const ctx = canvas.getContext('2d')
+
+  if (!ctx) return
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+  ctx.strokeStyle = '#00ff88'
+  ctx.lineWidth = 5
+
+  ctx.strokeRect(
+    150,
+    100,
+    250,
+    250
+  )
+
+  ctx.fillStyle = '#00ff88'
+  ctx.font = '24px Arial'
+
+  ctx.fillText(
+    'Logo Detectado',
+    150,
+    90
+  )
+}
+
+
+
+/*    try {
       setLoading(true)
-
-      const image = imageRef.current
-
-      const session = getSession()
-
-      const tempCanvas =
-        document.createElement('canvas')
-
-      tempCanvas.width = 640
-      tempCanvas.height = 640
-
-      const ctx = tempCanvas.getContext('2d')
-
-      if (!ctx) return
-
-      ctx.drawImage(image, 0, 0, 640, 640)
-
-      const imageData = ctx.getImageData(
-        0,
-        0,
-        640,
-        640
-      )
-
-      const { data } = imageData
-
-      const float32Data =
-        new Float32Array(3 * 640 * 640)
-
-      for (let i = 0; i < 640 * 640; i++) {
-        float32Data[i] = data[i * 4] / 255
-
-        float32Data[i + 640 * 640] =
-          data[i * 4 + 1] / 255
-
-        float32Data[i + 640 * 640 * 2] =
-          data[i * 4 + 2] / 255
-      }
-
-      const tensor = new ort.Tensor(
-        'float32',
-        float32Data,
-        [1, 3, 640, 640]
-      )
-
-      const results = await session.run({
-        images: tensor
-      })
-
-      console.log(results)
-
-      drawFakeDetection()
-
-      setLoading(false)
     } catch (error) {
       console.error(error)
 
@@ -119,7 +149,7 @@ function App() {
 
       setLoading(false)
     }
-  }
+  }*/
 
   const drawFakeDetection = () => {
     const canvas = canvasRef.current
@@ -394,97 +424,113 @@ function App() {
         `}
       </style>
 
-      <div className="container">
-        <div className="card">
+              <div className="container">
+                <div className="card">
 
-          <h1 className="title">
-            Sistema de vision por computadora
-          </h1>
+                  <h1 className="title">
+                    Sistema de vision por computadora
+                  </h1>
 
-          <p className="subtitle">
-            Plataforma para subir imágenes o videos y probar
-            modelos de inteligencia artificial de vision
-            por computadora.
-          </p>
+                  <p className="subtitle">
+                    Plataforma para subir imágenes o videos y probar
+                    modelos de inteligencia artificial de vision
+                    por computadora.
+                  </p>
 
-          <div className="status">
-            {modelReady
-              ? '✅ Modelo YOLO cargado'
-              : '⏳ Cargando modelo YOLO...'}
-          </div>
+                  <div className="status">
+                    {modelReady
+                      ? '✅ Modelo YOLO cargado'
+                      : '⏳ Cargando modelo YOLO...'}
+                  </div>
 
-          <div className="buttonContainer">
+                  <div className="buttonContainer">
 
-            <button
-              className="uploadButton"
-              onClick={handleUploadClick}
-            >
-              📁 Subir Imagen o Video
-            </button>
+                    <button
+                      className="uploadButton"
+                      onClick={handleUploadClick}
+                    >
+                      📁 Subir Imagen o Video
+                    </button>
 
-            <button
-              className="testButton"
-              onClick={handleModelTest}
-            >
-              {loading
-                ? '⏳ Detectando...'
-                : '🚀 Probar Modelo'}
-            </button>
+                    <button
+                      className="testButton"
+                      onClick={handleModelTest}
+                    >
+                      {loading
+                        ? '⏳ Detectando...'
+                        : '🚀 Probar Modelo'}
+                    </button>
 
-          </div>
+                  </div>
 
-          <input
-            type="file"
-            accept="image/*,video/*"
-            ref={fileInputRef}
-            style={{ display: 'none' }}
-            onChange={handleFileChange}
+                  <input
+                    type="file"
+                    accept="image/*,video/*"
+                    ref={fileInputRef}
+                    style={{ display: 'none' }}
+                    onChange={handleFileChange}
+                  />
+
+                  {selectedFile && (
+                    <div className="fileInfo">
+
+                      <h3>Archivo Seleccionado</h3>
+
+                      <p>{selectedFile}</p>
+
+                    </div>
+                  )}
+
+        {previewURL && (
+          
+  <div className="previewContainer">
+
+    <h2>Vista Previa</h2>
+
+    {fileType.startsWith('image') ? (
+      <div className="previewWrapper">
+
+        <img
+          ref={imageRef}
+          src={previewURL}
+          alt="preview"
+          className="previewImage"
+        />
+
+        <canvas
+          ref={canvasRef}
+          className="canvas"
+        />
+
+      </div>
+    ) : (
+      <div className="previewWrapper">
+
+        <video
+          ref={videoRef}
+          controls
+          className="previewVideo"
+        >
+          <source
+            src={previewURL}
+            type={fileType}
           />
+        </video>
 
-          {selectedFile && (
-            <div className="fileInfo">
+        <canvas
+          ref={canvasRef}
+          className="canvas"
+          style={{
+            pointerEvents: 'none'
+          }}
+        />
 
-              <h3>Archivo Seleccionado</h3>
+      </div>
+    )}
 
-              <p>{selectedFile}</p>
+  </div>
+)}
 
-            </div>
-          )}
-
-          {previewURL && (
-            <div className="previewContainer">
-
-              <h2>Vista Previa</h2>
-
-              {fileType.startsWith('image') ? (
-                <div className="previewWrapper">
-
-                  <img
-                    ref={imageRef}
-                    src={previewURL}
-                    alt="preview"
-                    className="previewImage"
-                  />
-
-                  <canvas
-                    ref={canvasRef}
-                    className="canvas"
-                  />
-
-                </div>
-              ) : (
-                <video
-                  controls
-                  className="previewVideo"
-                >
-                  <source
-                    src={previewURL}
-                    type={fileType}
-                  />
-                </video>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </>
