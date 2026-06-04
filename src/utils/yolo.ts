@@ -6,6 +6,16 @@ const IOU_THRESHOLD = 0.45
 
 let session: ort.InferenceSession | null = null
 
+export const CLASS_NAMES: Record<number, string> = {
+  0: 'Morena',
+  1: 'Movimiento Ciudadano',
+  2: 'PAN',
+  3: 'PT',
+  4: 'Verde',
+  5: 'PRD',
+  6: 'PRI',
+}
+
 export interface Detection {
   x1: number
   y1: number

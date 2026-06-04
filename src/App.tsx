@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { loadModel, runInference } from './utils/yolo'
+import { loadModel, runInference, CLASS_NAMES } from './utils/yolo'
 import type { Detection } from './utils/yolo'
 import './App.css'
 
@@ -72,7 +72,7 @@ function App() {
       const dy1 = y1 * scaleY
       const dx2 = x2 * scaleX
       const dy2 = y2 * scaleY
-      const label = `Logo${classId > 0 ? ` ${classId}` : ''} ${(conf * 100).toFixed(0)}%`
+      const label = `${CLASS_NAMES[classId] ?? `Clase ${classId}`} ${(conf * 100).toFixed(0)}%`
 
       ctx.strokeStyle = '#F24C3D'
       ctx.lineWidth   = Math.max(2, displayW / 300)
