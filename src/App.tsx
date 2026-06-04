@@ -1,539 +1,242 @@
 import { useEffect, useRef, useState } from 'react'
-//import * as ort from 'onnxruntime-web'
-//import { loadModel, getSession } from './utils/yolo'
-import { loadModel } from './utils/yolo'
+import { loadModel, runInference } from './utils/yolo'
+import type { Detection } from './utils/yolo'
+import './App.css'
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-
-  const imageRef = useRef<HTMLImageElement | null>(null)
-
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-
+  const imageRef     = useRef<HTMLImageElement | null>(null)
+  const canvasRef    = useRef<HTMLCanvasElement | null>(null)
+  const videoRef     = useRef<HTMLVideoElement | null>(null)
   const animationRef = useRef<number | null>(null)
 
-  const [selectedFile, setSelectedFile] = useState('')
-  const [previewURL, setPreviewURL] = useState('')
-  const [fileType, setFileType] = useState('')
+  const [selectedFile,    setSelectedFile]    = useState('')
+  const [previewURL,      setPreviewURL]      = useState('')
+  const [fileType,        setFileType]        = useState('')
+  const [loading,         setLoading]         = useState(false)
+  const [modelReady,      setModelReady]      = useState(false)
+  const [detectionCount,  setDetectionCount]  = useState<number | null>(null)
+  const [isDragging,      setIsDragging]      = useState(false)
 
-  const [loading, setLoading] = useState(false)
-
-  const [modelReady, setModelReady] = useState(false)
-
- 
   useEffect(() => {
-    const initModel = async () => {
-      await loadModel()
-
-      setModelReady(true)
-
-      console.log('YOLO listo')
+    loadModel().then(() => setModelReady(true)).catch(console.error)
+    return () => {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current)
     }
-
-    initModel()
   }, [])
 
-  useEffect(() => {
-  return () => {
+  const handleFile = (file: File) => {
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current)
+      animationRef.current = null
     }
+    setSelectedFile(file.name)
+    setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
+    setFileType(file.type)
+    setDetectionCount(null)
   }
-  }, [])
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click()
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) handleFile(file)
   }
 
-  const handleFileChange = (
-    event: React.ChangeEvent<HTMLInputElement>
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (file && (file.type.startsWith('image') || file.type.startsWith('video'))) handleFile(file)
+  }
+
+  const drawDetections = (
+    canvas: HTMLCanvasElement,
+    detections: Detection[],
+    displayW: number,
+    displayH: number,
+    srcW: number,
+    srcH: number,
   ) => {
-    const file = event.target.files?.[0]
+    canvas.width  = displayW
+    canvas.height = displayH
+    const ctx = canvas.getContext('2d')!
+    ctx.clearRect(0, 0, displayW, displayH)
+    if (detections.length === 0) return
 
-    if (file) {
-      setSelectedFile(file.name)
+    const scaleX   = displayW / srcW
+    const scaleY   = displayH / srcH
+    const fontSize = Math.max(12, Math.min(16, displayW / 45))
+    ctx.font = `bold ${fontSize}px -apple-system, sans-serif`
 
-      const url = URL.createObjectURL(file)
+    for (const { x1, y1, x2, y2, conf, classId } of detections) {
+      const dx1 = x1 * scaleX
+      const dy1 = y1 * scaleY
+      const dx2 = x2 * scaleX
+      const dy2 = y2 * scaleY
+      const label = `Logo${classId > 0 ? ` ${classId}` : ''} ${(conf * 100).toFixed(0)}%`
 
-      setPreviewURL(url)
+      ctx.strokeStyle = '#F24C3D'
+      ctx.lineWidth   = Math.max(2, displayW / 300)
+      ctx.strokeRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
 
-      setFileType(file.type)
+      const pad    = fontSize * 0.4
+      const textW  = ctx.measureText(label).width
+      const labelH = fontSize + pad * 2
+      const labelY = dy1 > labelH + 4 ? dy1 - labelH : dy2 + 4
+
+      ctx.fillStyle = '#483E8C'
+      ctx.fillRect(dx1 - 1, labelY, textW + pad * 2 + 2, labelH)
+      ctx.fillStyle = '#ffffff'
+      ctx.fillText(label, dx1 + pad, labelY + fontSize + pad * 0.4)
     }
   }
 
-  const handleModelTest = async () => {
-  if (fileType.startsWith('image')) {
-    runImageDetection()
-    return
+  const handleDetect = async () => {
+    if (fileType.startsWith('image'))      await runImageDetection()
+    else if (fileType.startsWith('video')) runVideoDetection()
   }
 
-  if (fileType.startsWith('video')) {
-    runVideoDetection()
-    return
-  }
-
-  alert('Selecciona una imagen o video')
-}
-const runImageDetection = async () => {
-  if (!imageRef.current) return
-
-  drawFakeDetection()
-}
-
-const runVideoDetection = async () => {
-  if (!videoRef.current) return
-
-  const video = videoRef.current
-
-  video.play()
-
-  const processFrame = () => {
-    if (video.paused || video.ended) {
-      return
-    }
-
-    drawVideoDetection()
-
-    animationRef.current =
-      requestAnimationFrame(processFrame)
-  }
-
-  processFrame()
-}
-
-const drawVideoDetection = () => {
-  const video = videoRef.current
-
-  const canvas = canvasRef.current
-
-  if (!video || !canvas) return
-
-  canvas.width = video.videoWidth
-  canvas.height = video.videoHeight
-
-  const ctx = canvas.getContext('2d')
-
-  if (!ctx) return
-
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-  ctx.strokeStyle = '#00ff88'
-  ctx.lineWidth = 5
-
-  ctx.strokeRect(
-    150,
-    100,
-    250,
-    250
-  )
-
-  ctx.fillStyle = '#00ff88'
-  ctx.font = '24px Arial'
-
-  ctx.fillText(
-    'Logo Detectado',
-    150,
-    90
-  )
-}
-
-
-
-/*    try {
-      setLoading(true)
-    } catch (error) {
-      console.error(error)
-
+  const runImageDetection = async () => {
+    const img    = imageRef.current
+    const canvas = canvasRef.current
+    if (!img || !canvas) return
+    setLoading(true)
+    try {
+      const detections = await runInference(img)
+      drawDetections(canvas, detections, img.offsetWidth, img.offsetHeight, img.naturalWidth, img.naturalHeight)
+      setDetectionCount(detections.length)
+    } catch (e) {
+      console.error(e)
       alert('Error ejecutando el modelo')
-
+    } finally {
       setLoading(false)
     }
-  }*/
+  }
 
-  const drawFakeDetection = () => {
+  const runVideoDetection = () => {
+    const video  = videoRef.current
     const canvas = canvasRef.current
+    if (!video || !canvas) return
 
-    const image = imageRef.current
+    if (animationRef.current) cancelAnimationFrame(animationRef.current)
+    video.play()
 
-    if (!canvas || !image) return
+    let frameIdx = 0
+    let lastDets: Detection[] = []
+    let inferring = false
 
-    canvas.width = image.width
+    const tick = () => {
+      if (video.paused || video.ended) return
 
-    canvas.height = image.height
+      if (!inferring && frameIdx % 3 === 0 && video.videoWidth > 0) {
+        inferring = true
+        runInference(video)
+          .then(dets => { lastDets = dets; setDetectionCount(dets.length) })
+          .catch(() => {})
+          .finally(() => { inferring = false })
+      }
 
-    const ctx = canvas.getContext('2d')
+      if (video.videoWidth > 0) {
+        drawDetections(canvas, lastDets, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight)
+      }
 
-    if (!ctx) return
+      frameIdx++
+      animationRef.current = requestAnimationFrame(tick)
+    }
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    ctx.strokeStyle = '#00ff88'
-
-    ctx.lineWidth = 5
-
-    ctx.strokeRect(120, 120, 260, 260)
-
-    ctx.fillStyle = '#00ff88'
-
-    ctx.font = '24px Arial'
-
-    ctx.fillText(
-      'Logo Detectado',
-      120,
-      105
-    )
+    tick()
   }
 
   return (
-    <>
-      <style>
-        {`
-          *{
-            margin:0;
-            padding:0;
-            box-sizing:border-box;
-            font-family:Arial, Helvetica, sans-serif;
-          }
-
-          body{
-            background:
-              radial-gradient(circle at top left, #153b72 0%, transparent 35%),
-              radial-gradient(circle at bottom right, #0c2b58 0%, transparent 35%),
-              linear-gradient(135deg, #050b16, #091425, #10233d);
-
-            min-height:100vh;
-            overflow-x:hidden;
-          }
-
-          .container{
-            width:100%;
-            min-height:100vh;
-
-            display:flex;
-            justify-content:center;
-            align-items:center;
-
-            padding:30px;
-          }
-
-          .card{
-            width:100%;
-            max-width:950px;
-
-            background:rgba(10,20,40,0.82);
-
-            border:1px solid rgba(255,255,255,0.08);
-
-            border-radius:28px;
-
-            padding:50px;
-
-            backdrop-filter:blur(12px);
-
-            box-shadow:
-              0 0 30px rgba(0,102,255,0.15),
-              0 0 70px rgba(0,102,255,0.08);
-          }
-
-          .title{
-            text-align:center;
-
-            font-size:3.2rem;
-
-            color:white;
-
-            margin-bottom:15px;
-          }
-
-          .subtitle{
-            text-align:center;
-
-            color:#b9c8e0;
-
-            font-size:1.1rem;
-
-            line-height:1.7;
-
-            max-width:700px;
-
-            margin:auto auto 45px auto;
-          }
-
-          .buttonContainer{
-            display:flex;
-            justify-content:center;
-            gap:25px;
-
-            flex-wrap:wrap;
-
-            margin-bottom:40px;
-          }
-
-          .uploadButton,
-          .testButton{
-            border:none;
-
-            padding:18px 32px;
-
-            border-radius:18px;
-
-            font-size:1rem;
-            font-weight:bold;
-
-            cursor:pointer;
-
-            min-width:260px;
-
-            transition:0.35s ease;
-
-            position:relative;
-
-            overflow:hidden;
-
-            color:white;
-          }
-
-          .uploadButton{
-            background:
-              linear-gradient(
-                135deg,
-                #0b63f6,
-                #3a8dff
-              );
-          }
-
-          .testButton{
-            background:
-              linear-gradient(
-                135deg,
-                #13325c,
-                #1d4d8f
-              );
-          }
-
-          .uploadButton:hover,
-          .testButton:hover{
-            transform:
-              translateY(-6px)
-              scale(1.03);
-          }
-
-          .uploadButton:active,
-          .testButton:active{
-            transform:scale(0.96);
-          }
-
-          .fileInfo{
-            background:rgba(255,255,255,0.05);
-
-            border:1px solid rgba(255,255,255,0.08);
-
-            border-radius:18px;
-
-            padding:22px;
-
-            color:white;
-
-            margin-bottom:35px;
-          }
-
-          .fileInfo h3{
-            color:#7fb4ff;
-
-            margin-bottom:10px;
-          }
-
-          .previewContainer{
-            margin-top:10px;
-
-            text-align:center;
-          }
-
-          .previewContainer h2{
-            color:white;
-
-            margin-bottom:25px;
-
-            font-size:2rem;
-          }
-
-          .previewWrapper{
-            position:relative;
-
-            display:inline-block;
-          }
-
-          .previewImage{
-            width:100%;
-
-            max-height:500px;
-
-            object-fit:contain;
-
-            border-radius:20px;
-
-            border:1px solid rgba(255,255,255,0.08);
-          }
-
-          .previewVideo{
-            width:100%;
-
-            max-height:500px;
-
-            border-radius:20px;
-          }
-
-          .canvas{
-            position:absolute;
-
-            top:0;
-            left:0;
-          }
-
-          .status{
-            text-align:center;
-
-            margin-bottom:25px;
-
-            color:#9dd2ff;
-
-            font-weight:bold;
-          }
-
-          @media(max-width:768px){
-
-            .card{
-              padding:30px;
-            }
-
-            .title{
-              font-size:2.3rem;
-            }
-
-            .buttonContainer{
-              flex-direction:column;
-              align-items:center;
-            }
-
-            .uploadButton,
-            .testButton{
-              width:100%;
-            }
-          }
-        `}
-      </style>
-
-              <div className="container">
-                <div className="card">
-
-                  <h1 className="title">
-                    Sistema de vision por computadora
-                  </h1>
-
-                  <p className="subtitle">
-                    Plataforma para subir imágenes o videos y probar
-                    modelos de inteligencia artificial de vision
-                    por computadora.
-                  </p>
-
-                  <div className="status">
-                    {modelReady
-                      ? '✅ Modelo YOLO cargado'
-                      : '⏳ Cargando modelo YOLO...'}
-                  </div>
-
-                  <div className="buttonContainer">
-
-                    <button
-                      className="uploadButton"
-                      onClick={handleUploadClick}
-                    >
-                      📁 Subir Imagen o Video
-                    </button>
-
-                    <button
-                      className="testButton"
-                      onClick={handleModelTest}
-                    >
-                      {loading
-                        ? '⏳ Detectando...'
-                        : '🚀 Probar Modelo'}
-                    </button>
-
-                  </div>
-
-                  <input
-                    type="file"
-                    accept="image/*,video/*"
-                    ref={fileInputRef}
-                    style={{ display: 'none' }}
-                    onChange={handleFileChange}
-                  />
-
-                  {selectedFile && (
-                    <div className="fileInfo">
-
-                      <h3>Archivo Seleccionado</h3>
-
-                      <p>{selectedFile}</p>
-
-                    </div>
-                  )}
+    <div className="page">
+      <div className="card">
+
+        <header className="header">
+          <img src="/image.png" alt="Intelite" className="logo" />
+          <h1 className="title">Detección de Logotipos</h1>
+          <p className="subtitle">
+            Analiza imágenes y video para detectar logotipos políticos con IA
+          </p>
+        </header>
+
+        <div className={`status-badge ${modelReady ? 'ready' : 'loading-status'}`}>
+          <span className="dot" />
+          {modelReady ? 'Modelo listo' : 'Cargando modelo…'}
+        </div>
+
+        <div
+          className={`dropzone${isDragging ? ' dragging' : ''}${previewURL ? ' has-file' : ''}`}
+          onClick={() => fileInputRef.current?.click()}
+          onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+        >
+          {previewURL ? (
+            <span className="dropzone-filename">{selectedFile}</span>
+          ) : (
+            <>
+              <span className="dropzone-icon">📂</span>
+              <span className="dropzone-text">Arrastra una imagen o video aquí</span>
+              <span className="dropzone-hint">o haz clic para seleccionar</span>
+            </>
+          )}
+        </div>
+
+        <input
+          type="file"
+          accept="image/*,video/*"
+          ref={fileInputRef}
+          style={{ display: 'none' }}
+          onChange={handleFileChange}
+        />
+
+        <div className="actions">
+          <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>
+            Subir archivo
+          </button>
+          <button
+            className="btn btn-detect"
+            onClick={handleDetect}
+            disabled={!previewURL || loading || !modelReady}
+          >
+            {loading ? 'Detectando…' : 'Detectar logotipos'}
+          </button>
+        </div>
+
+        {detectionCount !== null && (
+          <div className={`detection-result ${detectionCount > 0 ? 'found' : 'empty'}`}>
+            {detectionCount === 0
+              ? 'No se encontraron logotipos en este archivo'
+              : `${detectionCount} logotipo${detectionCount !== 1 ? 's' : ''} detectado${detectionCount !== 1 ? 's' : ''}`}
+          </div>
+        )}
 
         {previewURL && (
-          
-  <div className="previewContainer">
-
-    <h2>Vista Previa</h2>
-
-    {fileType.startsWith('image') ? (
-      <div className="previewWrapper">
-
-        <img
-          ref={imageRef}
-          src={previewURL}
-          alt="preview"
-          className="previewImage"
-        />
-
-        <canvas
-          ref={canvasRef}
-          className="canvas"
-        />
-
-      </div>
-    ) : (
-      <div className="previewWrapper">
-
-        <video
-          ref={videoRef}
-          controls
-          className="previewVideo"
-        >
-          <source
-            src={previewURL}
-            type={fileType}
-          />
-        </video>
-
-        <canvas
-          ref={canvasRef}
-          className="canvas"
-          style={{
-            pointerEvents: 'none'
-          }}
-        />
+          <div className="preview-section">
+            <div className="preview-wrapper">
+              {fileType.startsWith('image') ? (
+                <>
+                  <img
+                    ref={imageRef}
+                    src={previewURL}
+                    alt="Vista previa"
+                    className="preview-media"
+                  />
+                  <canvas ref={canvasRef} className="overlay-canvas" />
+                </>
+              ) : (
+                <>
+                  <video ref={videoRef} controls className="preview-media">
+                    <source src={previewURL} type={fileType} />
+                  </video>
+                  <canvas ref={canvasRef} className="overlay-canvas" style={{ pointerEvents: 'none' }} />
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
       </div>
-    )}
-
-  </div>
-)}
-
-        </div>
-      </div>
-    </>
+    </div>
   )
 }
 
