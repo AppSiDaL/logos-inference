@@ -2,7 +2,6 @@ import * as ort from 'onnxruntime-web'
 
 const INPUT_SIZE = 640
 const CONF_THRESHOLD = 0.25
-const IOU_THRESHOLD = 0.45
 
 let session: ort.InferenceSession | null = null
 
@@ -59,25 +58,6 @@ function preprocess(source: HTMLImageElement | HTMLVideoElement): {
   }
 }
 
-function iou(a: Detection, b: Detection): number {
-  const ix1 = Math.max(a.x1, b.x1)
-  const iy1 = Math.max(a.y1, b.y1)
-  const ix2 = Math.min(a.x2, b.x2)
-  const iy2 = Math.min(a.y2, b.y2)
-  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1)
-  const union = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter
-  return union > 0 ? inter / union : 0
-}
-
-function nms(dets: Detection[]): Detection[] {
-  dets.sort((a, b) => b.conf - a.conf)
-  const kept: Detection[] = []
-  for (const d of dets) {
-    if (!kept.some(k => iou(d, k) > IOU_THRESHOLD)) kept.push(d)
-  }
-  return kept
-}
-
 export const runInference = async (
   source: HTMLImageElement | HTMLVideoElement
 ): Promise<Detection[]> => {
@@ -87,45 +67,28 @@ export const runInference = async (
 
   const inputName = session.inputNames[0]
   const out = await session.run({ [inputName]: tensor })
-  const outputName = session.outputNames[0]
-  const data = out[outputName].data as Float32Array
-  const dims = out[outputName].dims
+  const data = out[session.outputNames[0]].data as Float32Array
+  const dims = out[session.outputNames[0]].dims
 
-  // Handle both [1, 4+nc, 8400] and transposed [1, 8400, 4+nc]
-  const isTransposed = dims[1] > dims[2]
-  const numAttrs   = isTransposed ? dims[2] : dims[1]
-  const numAnchors = isTransposed ? dims[1] : dims[2]
-
-  const getValue = (attr: number, anchor: number) =>
-    isTransposed
-      ? data[anchor * numAttrs + attr]
-      : data[attr * numAnchors + anchor]
-
+  // End-to-end (NMS-free) output: [1, N, 6] => [x1, y1, x2, y2, score, classId]
+  // Boxes already filtered/deduplicated by the model, in 640x640 pixel space.
+  const numDets = dims[1]
   const detections: Detection[] = []
 
-  for (let i = 0; i < numAnchors; i++) {
-    let maxConf = 0
-    let maxClass = 0
-    for (let c = 4; c < numAttrs; c++) {
-      const conf = getValue(c, i)
-      if (conf > maxConf) { maxConf = conf; maxClass = c - 4 }
-    }
-    if (maxConf < CONF_THRESHOLD) continue
-
-    const cx = getValue(0, i)
-    const cy = getValue(1, i)
-    const w  = getValue(2, i)
-    const h  = getValue(3, i)
+  for (let i = 0; i < numDets; i++) {
+    const o = i * 6
+    const conf = data[o + 4]
+    if (conf < CONF_THRESHOLD) continue
 
     detections.push({
-      x1: (cx - w / 2) * scaleX,
-      y1: (cy - h / 2) * scaleY,
-      x2: (cx + w / 2) * scaleX,
-      y2: (cy + h / 2) * scaleY,
-      conf: maxConf,
-      classId: maxClass,
+      x1: data[o]     * scaleX,
+      y1: data[o + 1] * scaleY,
+      x2: data[o + 2] * scaleX,
+      y2: data[o + 3] * scaleY,
+      conf,
+      classId: Math.round(data[o + 5]),
     })
   }
 
-  return nms(detections)
+  return detections
 }
