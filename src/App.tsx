@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { loadModel, runInference, CLASS_NAMES } from './utils/yolo'
 import type { Detection } from './utils/yolo'
 import './App.css'
@@ -9,14 +9,17 @@ function App() {
   const canvasRef    = useRef<HTMLCanvasElement | null>(null)
   const videoRef     = useRef<HTMLVideoElement | null>(null)
   const animationRef = useRef<number | null>(null)
+  const selectedRef  = useRef<number | null>(null)
 
-  const [selectedFile,    setSelectedFile]    = useState('')
-  const [previewURL,      setPreviewURL]      = useState('')
-  const [fileType,        setFileType]        = useState('')
-  const [loading,         setLoading]         = useState(false)
-  const [modelReady,      setModelReady]      = useState(false)
-  const [detectionCount,  setDetectionCount]  = useState<number | null>(null)
-  const [isDragging,      setIsDragging]      = useState(false)
+  const [selectedFile, setSelectedFile] = useState('')
+  const [previewURL,   setPreviewURL]   = useState('')
+  const [fileType,     setFileType]     = useState('')
+  const [loading,      setLoading]      = useState(false)
+  const [modelReady,   setModelReady]   = useState(false)
+  const [isDragging,   setIsDragging]   = useState(false)
+  const [detections,   setDetections]   = useState<Detection[]>([])
+  const [hasRun,       setHasRun]       = useState(false)
+  const [selectedIdx,  setSelectedIdx]  = useState<number | null>(null)
 
   useEffect(() => {
     loadModel().then(() => setModelReady(true)).catch(console.error)
@@ -33,7 +36,10 @@ function App() {
     setSelectedFile(file.name)
     setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
     setFileType(file.type)
-    setDetectionCount(null)
+    setDetections([])
+    setHasRun(false)
+    setSelectedIdx(null)
+    selectedRef.current = null
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -48,34 +54,41 @@ function App() {
     if (file && (file.type.startsWith('image') || file.type.startsWith('video'))) handleFile(file)
   }
 
-  const drawDetections = (
+  const drawDetections = useCallback((
     canvas: HTMLCanvasElement,
-    detections: Detection[],
+    dets: Detection[],
     displayW: number,
     displayH: number,
     srcW: number,
     srcH: number,
+    highlightIdx: number,
   ) => {
     canvas.width  = displayW
     canvas.height = displayH
     const ctx = canvas.getContext('2d')!
     ctx.clearRect(0, 0, displayW, displayH)
-    if (detections.length === 0) return
+    if (dets.length === 0) return
 
     const scaleX   = displayW / srcW
     const scaleY   = displayH / srcH
     const fontSize = Math.max(12, Math.min(16, displayW / 45))
     ctx.font = `bold ${fontSize}px -apple-system, sans-serif`
 
-    for (const { x1, y1, x2, y2, conf, classId } of detections) {
-      const dx1 = x1 * scaleX
-      const dy1 = y1 * scaleY
-      const dx2 = x2 * scaleX
-      const dy2 = y2 * scaleY
-      const label = `${CLASS_NAMES[classId] ?? `Clase ${classId}`} ${(conf * 100).toFixed(0)}%`
+    dets.forEach((det, idx) => {
+      const dx1 = det.x1 * scaleX
+      const dy1 = det.y1 * scaleY
+      const dx2 = det.x2 * scaleX
+      const dy2 = det.y2 * scaleY
+      const isHi = idx === highlightIdx
+      const label = `${CLASS_NAMES[det.classId] ?? `Clase ${det.classId}`} ${(det.conf * 100).toFixed(0)}%`
 
-      ctx.strokeStyle = '#F24C3D'
-      ctx.lineWidth   = Math.max(2, displayW / 300)
+      if (isHi) {
+        ctx.fillStyle = 'rgba(242, 76, 61, 0.28)'
+        ctx.fillRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
+      }
+
+      ctx.strokeStyle = isHi ? '#F24C3D' : 'rgba(242, 76, 61, 0.8)'
+      ctx.lineWidth   = Math.max(2, displayW / 300) * (isHi ? 1.8 : 1)
       ctx.strokeRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
 
       const pad    = fontSize * 0.4
@@ -83,12 +96,21 @@ function App() {
       const labelH = fontSize + pad * 2
       const labelY = dy1 > labelH + 4 ? dy1 - labelH : dy2 + 4
 
-      ctx.fillStyle = '#483E8C'
+      ctx.fillStyle = isHi ? '#F24C3D' : '#483E8C'
       ctx.fillRect(dx1 - 1, labelY, textW + pad * 2 + 2, labelH)
       ctx.fillStyle = '#ffffff'
       ctx.fillText(label, dx1 + pad, labelY + fontSize + pad * 0.4)
-    }
-  }
+    })
+  }, [])
+
+  // Redraw the image overlay whenever detections or the selected box change.
+  useEffect(() => {
+    if (!fileType.startsWith('image')) return
+    const img = imageRef.current
+    const canvas = canvasRef.current
+    if (!img || !canvas) return
+    drawDetections(canvas, detections, img.offsetWidth, img.offsetHeight, img.naturalWidth, img.naturalHeight, selectedIdx ?? -1)
+  }, [detections, selectedIdx, fileType, drawDetections])
 
   const handleDetect = async () => {
     if (fileType.startsWith('image'))      await runImageDetection()
@@ -96,14 +118,15 @@ function App() {
   }
 
   const runImageDetection = async () => {
-    const img    = imageRef.current
-    const canvas = canvasRef.current
-    if (!img || !canvas) return
+    const img = imageRef.current
+    if (!img) return
     setLoading(true)
     try {
-      const detections = await runInference(img)
-      drawDetections(canvas, detections, img.offsetWidth, img.offsetHeight, img.naturalWidth, img.naturalHeight)
-      setDetectionCount(detections.length)
+      const dets = await runInference(img)
+      setSelectedIdx(null)
+      selectedRef.current = null
+      setDetections(dets)
+      setHasRun(true)
     } catch (e) {
       console.error(e)
       alert('Error ejecutando el modelo')
@@ -119,6 +142,7 @@ function App() {
 
     if (animationRef.current) cancelAnimationFrame(animationRef.current)
     video.play()
+    setHasRun(true)
 
     let frameIdx = 0
     let lastDets: Detection[] = []
@@ -130,13 +154,13 @@ function App() {
       if (!inferring && frameIdx % 3 === 0 && video.videoWidth > 0) {
         inferring = true
         runInference(video)
-          .then(dets => { lastDets = dets; setDetectionCount(dets.length) })
+          .then(dets => { lastDets = dets; setDetections(dets) })
           .catch(() => {})
           .finally(() => { inferring = false })
       }
 
       if (video.videoWidth > 0) {
-        drawDetections(canvas, lastDets, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight)
+        drawDetections(canvas, lastDets, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
       }
 
       frameIdx++
@@ -144,6 +168,12 @@ function App() {
     }
 
     tick()
+  }
+
+  const selectDetection = (i: number) => {
+    const next = selectedIdx === i ? null : i
+    setSelectedIdx(next)
+    selectedRef.current = next
   }
 
   return (
@@ -202,36 +232,58 @@ function App() {
           </button>
         </div>
 
-        {detectionCount !== null && (
-          <div className={`detection-result ${detectionCount > 0 ? 'found' : 'empty'}`}>
-            {detectionCount === 0
-              ? 'No se encontraron logotipos en este archivo'
-              : `${detectionCount} logotipo${detectionCount !== 1 ? 's' : ''} detectado${detectionCount !== 1 ? 's' : ''}`}
-          </div>
-        )}
-
         {previewURL && (
-          <div className="preview-section">
-            <div className="preview-wrapper">
-              {fileType.startsWith('image') ? (
-                <>
-                  <img
-                    ref={imageRef}
-                    src={previewURL}
-                    alt="Vista previa"
-                    className="preview-media"
-                  />
-                  <canvas ref={canvasRef} className="overlay-canvas" />
-                </>
-              ) : (
-                <>
-                  <video ref={videoRef} controls className="preview-media">
-                    <source src={previewURL} type={fileType} />
-                  </video>
-                  <canvas ref={canvasRef} className="overlay-canvas" style={{ pointerEvents: 'none' }} />
-                </>
-              )}
+          <div className="results-layout">
+            <div className="preview-section">
+              <div className="preview-wrapper">
+                {fileType.startsWith('image') ? (
+                  <>
+                    <img
+                      ref={imageRef}
+                      src={previewURL}
+                      alt="Vista previa"
+                      className="preview-media"
+                    />
+                    <canvas ref={canvasRef} className="overlay-canvas" />
+                  </>
+                ) : (
+                  <>
+                    <video ref={videoRef} controls className="preview-media">
+                      <source src={previewURL} type={fileType} />
+                    </video>
+                    <canvas ref={canvasRef} className="overlay-canvas" style={{ pointerEvents: 'none' }} />
+                  </>
+                )}
+              </div>
             </div>
+
+            {hasRun && (
+              <aside className="detections-panel">
+                <div className="panel-header">
+                  <span className="panel-title">Detecciones</span>
+                  <span className="panel-count">{detections.length}</span>
+                </div>
+
+                {detections.length === 0 ? (
+                  <p className="panel-empty">Sin logotipos detectados</p>
+                ) : (
+                  <ul className="detection-list">
+                    {detections.map((d, i) => (
+                      <li
+                        key={i}
+                        className={`detection-item${selectedIdx === i ? ' active' : ''}`}
+                        onClick={() => selectDetection(i)}
+                      >
+                        <span className="detection-class">
+                          {CLASS_NAMES[d.classId] ?? `Clase ${d.classId}`}
+                        </span>
+                        <span className="detection-conf">{(d.conf * 100).toFixed(0)}%</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </aside>
+            )}
           </div>
         )}
 
