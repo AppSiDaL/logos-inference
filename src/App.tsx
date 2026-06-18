@@ -10,6 +10,7 @@ function App() {
   const videoRef     = useRef<HTMLVideoElement | null>(null)
   const animationRef = useRef<number | null>(null)
   const selectedRef  = useRef<number | null>(null)
+  const streamRef    = useRef<MediaStream | null>(null)
 
   const [selectedFile, setSelectedFile] = useState('')
   const [previewURL,   setPreviewURL]   = useState('')
@@ -20,19 +21,26 @@ function App() {
   const [detections,   setDetections]   = useState<Detection[]>([])
   const [hasRun,       setHasRun]       = useState(false)
   const [selectedIdx,  setSelectedIdx]  = useState<number | null>(null)
+  const [isWebcam,     setIsWebcam]     = useState(false)
 
   useEffect(() => {
     loadModel().then(() => setModelReady(true)).catch(console.error)
     return () => {
       if (animationRef.current) cancelAnimationFrame(animationRef.current)
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
     }
   }, [])
 
+  const stopStream = () => {
+    if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null }
+    const video = videoRef.current
+    if (video) { video.srcObject = null }
+  }
+
   const handleFile = (file: File) => {
-    if (animationRef.current) {
-      cancelAnimationFrame(animationRef.current)
-      animationRef.current = null
-    }
+    stopStream()
+    setIsWebcam(false)
     setSelectedFile(file.name)
     setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
     setFileType(file.type)
@@ -103,7 +111,6 @@ function App() {
     })
   }, [])
 
-  // Redraw the image overlay whenever detections or the selected box change.
   useEffect(() => {
     if (!fileType.startsWith('image')) return
     const img = imageRef.current
@@ -149,7 +156,71 @@ function App() {
     let inferring = false
 
     const tick = () => {
-      if (video.paused || video.ended) return
+      if (video.ended) { animationRef.current = null; return }
+
+      if (!video.paused) {
+        if (!inferring && frameIdx % 3 === 0 && video.videoWidth > 0) {
+          inferring = true
+          runInference(video)
+            .then(dets => { lastDets = dets; setDetections(dets) })
+            .catch(() => {})
+            .finally(() => { inferring = false })
+        }
+        if (video.videoWidth > 0) {
+          drawDetections(canvas, lastDets, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
+        }
+        frameIdx++
+      }
+
+      animationRef.current = requestAnimationFrame(tick)
+    }
+
+    tick()
+  }
+
+  const startWebcam = async () => {
+    stopStream()
+    setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return '' })
+    setSelectedFile('')
+    setFileType('')
+    setDetections([])
+    setHasRun(false)
+    setSelectedIdx(null)
+    selectedRef.current = null
+    setIsWebcam(true)
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true })
+      streamRef.current = stream
+      const video = videoRef.current!
+      video.srcObject = stream
+      await video.play()
+      setHasRun(true)
+      runWebcamLoop()
+    } catch {
+      alert('No se pudo acceder a la cámara')
+      setIsWebcam(false)
+    }
+  }
+
+  const stopWebcam = () => {
+    stopStream()
+    setIsWebcam(false)
+    setDetections([])
+    setHasRun(false)
+  }
+
+  const runWebcamLoop = () => {
+    const video  = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) return
+
+    let frameIdx = 0
+    let lastDets: Detection[] = []
+    let inferring = false
+
+    const tick = () => {
+      if (!streamRef.current) { animationRef.current = null; return }
 
       if (!inferring && frameIdx % 3 === 0 && video.videoWidth > 0) {
         inferring = true
@@ -158,7 +229,6 @@ function App() {
           .catch(() => {})
           .finally(() => { inferring = false })
       }
-
       if (video.videoWidth > 0) {
         drawDetections(canvas, lastDets, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
       }
@@ -175,6 +245,8 @@ function App() {
     setSelectedIdx(next)
     selectedRef.current = next
   }
+
+  const showMedia = previewURL || isWebcam
 
   return (
     <div className="page">
@@ -193,23 +265,25 @@ function App() {
           {modelReady ? 'Modelo listo' : 'Cargando modelo…'}
         </div>
 
-        <div
-          className={`dropzone${isDragging ? ' dragging' : ''}${previewURL ? ' has-file' : ''}`}
-          onClick={() => fileInputRef.current?.click()}
-          onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={handleDrop}
-        >
-          {previewURL ? (
-            <span className="dropzone-filename">{selectedFile}</span>
-          ) : (
-            <>
-              <span className="dropzone-icon">📂</span>
-              <span className="dropzone-text">Arrastra una imagen o video aquí</span>
-              <span className="dropzone-hint">o haz clic para seleccionar</span>
-            </>
-          )}
-        </div>
+        {!isWebcam && (
+          <div
+            className={`dropzone${isDragging ? ' dragging' : ''}${previewURL ? ' has-file' : ''}`}
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={handleDrop}
+          >
+            {previewURL ? (
+              <span className="dropzone-filename">{selectedFile}</span>
+            ) : (
+              <>
+                <span className="dropzone-icon">📂</span>
+                <span className="dropzone-text">Arrastra una imagen o video aquí</span>
+                <span className="dropzone-hint">o haz clic para seleccionar</span>
+              </>
+            )}
+          </div>
+        )}
 
         <input
           type="file"
@@ -220,23 +294,54 @@ function App() {
         />
 
         <div className="actions">
-          <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>
-            Subir archivo
-          </button>
-          <button
-            className="btn btn-detect"
-            onClick={handleDetect}
-            disabled={!previewURL || loading || !modelReady}
-          >
-            {loading ? 'Detectando…' : 'Detectar logotipos'}
-          </button>
+          {!isWebcam ? (
+            <>
+              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>
+                Subir archivo
+              </button>
+              <button
+                className="btn btn-webcam"
+                onClick={startWebcam}
+                disabled={!modelReady}
+              >
+                Usar webcam
+              </button>
+              <button
+                className="btn btn-detect"
+                onClick={handleDetect}
+                disabled={!previewURL || loading || !modelReady}
+              >
+                {loading ? 'Detectando…' : 'Detectar logotipos'}
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>
+                Subir archivo
+              </button>
+              <button className="btn btn-webcam btn-webcam-stop" onClick={stopWebcam}>
+                Detener webcam
+              </button>
+            </>
+          )}
         </div>
 
-        {previewURL && (
+        {showMedia && (
           <div className="results-layout">
             <div className="preview-section">
               <div className="preview-wrapper">
-                {fileType.startsWith('image') ? (
+                {isWebcam ? (
+                  <>
+                    <video
+                      ref={videoRef}
+                      className="preview-media"
+                      autoPlay
+                      muted
+                      playsInline
+                    />
+                    <canvas ref={canvasRef} className="overlay-canvas" style={{ pointerEvents: 'none' }} />
+                  </>
+                ) : fileType.startsWith('image') ? (
                   <>
                     <img
                       ref={imageRef}

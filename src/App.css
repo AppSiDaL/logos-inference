@@ -171,6 +171,14 @@
   background: linear-gradient(135deg, #d43b2d, #F24C3D);
 }
 
+.btn-webcam {
+  background: linear-gradient(135deg, #1a6b4a, #22a870);
+}
+
+.btn-webcam-stop {
+  background: linear-gradient(135deg, #7a3a00, #c45c00);
+}
+
 .btn:not(:disabled):hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
