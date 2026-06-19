@@ -1,7 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { loadModel, runInference, CLASS_NAMES } from './utils/yolo'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useMemo
+} from 'react'
+import {
+  loadModel,
+  runInference,
+  CLASS_NAMES,
+  CLASS_COLORS
+} from './utils/yolo'
 import type { Detection } from './utils/yolo'
 import './App.css'
+
+const HISTORY_MAX = 8
+
+interface HistoryItem {
+  id: string
+  name: string
+  time: string
+  total: number
+  counts: Record<string, number>
+  thumb: string
+}
 
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -18,10 +40,80 @@ function App() {
   const [loading,      setLoading]      = useState(false)
   const [modelReady,   setModelReady]   = useState(false)
   const [isDragging,   setIsDragging]   = useState(false)
-  const [detections,   setDetections]   = useState<Detection[]>([])
+  const [rawDetections, setRawDetections] = useState<Detection[]>([])
+  const [confThreshold, setConfThreshold] = useState(0.25)
+  const [visibleClasses, setVisibleClasses] = useState<Record<number, boolean>>(
+    () =>
+      Object.fromEntries(
+        Object.keys(CLASS_NAMES).map(key => [
+          Number(key),
+          true
+        ])
+      )
+  )
+
+  const visibleClassesRef = useRef(visibleClasses)
+  const confRef = useRef(0.25)
   const [hasRun,       setHasRun]       = useState(false)
   const [selectedIdx,  setSelectedIdx]  = useState<number | null>(null)
   const [isWebcam,     setIsWebcam]     = useState(false)
+
+  const [fps, setFps] = useState<number>(0)
+  const lastInferenceTimeRef = useRef<number>(0)
+  const lastFpsUpdateRef = useRef<number>(0)
+  const fpsEmaRef = useRef<number>(0)
+  const MIN_INFERENCE_INTERVAL = 1000 / 30
+
+  const [history, setHistory] = useState<HistoryItem[]>(() => {
+    try {
+      const stored = localStorage.getItem('logo-history')
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        if (Array.isArray(parsed)) return parsed
+      }
+    } catch (e) {
+      console.error('Error inicializando el historial desde localStorage (corrupto):', e)
+    }
+    return []
+  })
+
+
+  const detections = useMemo(() => {
+    return rawDetections.filter(
+      d =>
+        d.conf >= confThreshold &&
+        visibleClasses[d.classId]
+    )
+  }, [rawDetections, confThreshold, visibleClasses])
+
+  const classStats = useMemo(() => {
+    const counts: Record<number, number> = {}
+
+    detections.forEach(det => {
+      counts[det.classId] = (counts[det.classId] || 0) + 1
+    })
+
+    return Object.entries(counts)
+      .map(([classId, count]) => ({
+        classId: Number(classId),
+        name: CLASS_NAMES[Number(classId)],
+        count
+      }))
+      .sort((a, b) => b.count - a.count)
+  }, [detections])
+
+  useEffect(() => {
+    confRef.current = confThreshold
+  }, [confThreshold])
+
+  useEffect(() => {
+    visibleClassesRef.current = visibleClasses
+  }, [visibleClasses])
+
+  useEffect(() => {
+    setSelectedIdx(null)
+    selectedRef.current = null
+  }, [confThreshold, visibleClasses])
 
   useEffect(() => {
     loadModel().then(() => setModelReady(true)).catch(console.error)
@@ -31,12 +123,41 @@ function App() {
     }
   }, [])
 
+  const trackInferenceFps = useCallback(() => {
+    const now = performance.now()
+    if (lastInferenceTimeRef.current > 0) {
+      const delta = now - lastInferenceTimeRef.current
+      const currentFps = 1000 / delta
+
+      if (fpsEmaRef.current === 0) {
+        fpsEmaRef.current = currentFps
+      } else {
+        fpsEmaRef.current = (0.2 * currentFps) + (0.8 * fpsEmaRef.current)
+      }
+
+      if (now - lastFpsUpdateRef.current > 300) {
+        setFps(Math.round(fpsEmaRef.current))
+        lastFpsUpdateRef.current = now
+      }
+    }
+    lastInferenceTimeRef.current = now
+  }, [])
+
+  const resetFpsStats = useCallback(() => {
+    setFps(0)
+    fpsEmaRef.current = 0
+    lastInferenceTimeRef.current = 0
+    lastFpsUpdateRef.current = 0
+  }, [])
+
   const stopStream = () => {
     if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
     if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null }
     const video = videoRef.current
     if (video) { video.srcObject = null }
+    resetFpsStats()
   }
+
 
   const handleFile = (file: File) => {
     stopStream()
@@ -44,7 +165,7 @@ function App() {
     setSelectedFile(file.name)
     setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
     setFileType(file.type)
-    setDetections([])
+    setRawDetections([])
     setHasRun(false)
     setSelectedIdx(null)
     selectedRef.current = null
@@ -62,6 +183,7 @@ function App() {
     if (file && (file.type.startsWith('image') || file.type.startsWith('video'))) handleFile(file)
   }
 
+
   const drawDetections = useCallback((
     canvas: HTMLCanvasElement,
     dets: Detection[],
@@ -71,10 +193,13 @@ function App() {
     srcH: number,
     highlightIdx: number,
   ) => {
-    canvas.width  = displayW
-    canvas.height = displayH
+    if (canvas.width !== displayW) canvas.width = displayW
+    if (canvas.height !== displayH) canvas.height = displayH
+
     const ctx = canvas.getContext('2d')!
-    ctx.clearRect(0, 0, displayW, displayH)
+    if (canvas === canvasRef.current) {
+      ctx.clearRect(0, 0, displayW, displayH)
+    }
     if (dets.length === 0) return
 
     const scaleX   = displayW / srcW
@@ -89,13 +214,14 @@ function App() {
       const dy2 = det.y2 * scaleY
       const isHi = idx === highlightIdx
       const label = `${CLASS_NAMES[det.classId] ?? `Clase ${det.classId}`} ${(det.conf * 100).toFixed(0)}%`
+      const color = CLASS_COLORS[det.classId] || '#00FF00'
 
       if (isHi) {
         ctx.fillStyle = 'rgba(242, 76, 61, 0.28)'
         ctx.fillRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
       }
 
-      ctx.strokeStyle = isHi ? '#F24C3D' : 'rgba(242, 76, 61, 0.8)'
+      ctx.strokeStyle = isHi ? '#F24C3D' : color
       ctx.lineWidth   = Math.max(2, displayW / 300) * (isHi ? 1.8 : 1)
       ctx.strokeRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
 
@@ -104,7 +230,7 @@ function App() {
       const labelH = fontSize + pad * 2
       const labelY = dy1 > labelH + 4 ? dy1 - labelH : dy2 + 4
 
-      ctx.fillStyle = isHi ? '#F24C3D' : '#483E8C'
+      ctx.fillStyle = isHi ? '#F24C3D' : color
       ctx.fillRect(dx1 - 1, labelY, textW + pad * 2 + 2, labelH)
       ctx.fillStyle = '#ffffff'
       ctx.fillText(label, dx1 + pad, labelY + fontSize + pad * 0.4)
@@ -119,6 +245,7 @@ function App() {
     drawDetections(canvas, detections, img.offsetWidth, img.offsetHeight, img.naturalWidth, img.naturalHeight, selectedIdx ?? -1)
   }, [detections, selectedIdx, fileType, drawDetections])
 
+
   const handleDetect = async () => {
     if (fileType.startsWith('image'))      await runImageDetection()
     else if (fileType.startsWith('video')) runVideoDetection()
@@ -132,8 +259,54 @@ function App() {
       const dets = await runInference(img)
       setSelectedIdx(null)
       selectedRef.current = null
-      setDetections(dets)
+      setRawDetections(dets)
       setHasRun(true)
+
+      const currentFiltered = dets.filter(d => d.conf >= confThreshold && visibleClasses[d.classId])
+      const counts: Record<string, number> = {}
+      currentFiltered.forEach(d => {
+        const name = CLASS_NAMES[d.classId] || `Clase ${d.classId}`
+        counts[name] = (counts[name] || 0) + 1
+      })
+
+      const thumbCanvas = document.createElement('canvas')
+      const thumbCtx = thumbCanvas.getContext('2d')
+      if (thumbCtx) {
+        const maxDim = 96
+        let tw = img.naturalWidth
+        let th = img.naturalHeight
+        if (tw > th) {
+          th = Math.round((th * maxDim) / tw)
+          tw = maxDim
+        } else {
+          tw = Math.round((tw * maxDim) / th)
+          th = maxDim
+        }
+        thumbCanvas.width = tw
+        thumbCanvas.height = th
+        thumbCtx.drawImage(img, 0, 0, tw, th)
+        const thumbDataUrl = thumbCanvas.toDataURL('image/jpeg', 0.6)
+
+        const newItem: HistoryItem = {
+          id: crypto.randomUUID?.() || String(Date.now()),
+          name: selectedFile,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          total: currentFiltered.length,
+          counts,
+          thumb: thumbDataUrl
+        }
+
+        setHistory(prev => {
+          const updated = [newItem, ...prev].slice(0, HISTORY_MAX)
+          try {
+            localStorage.setItem('logo-history', JSON.stringify(updated))
+          } catch (storageError) {
+            console.error('Límite de cuota excedido en localStorage. El historial no se guardó:', storageError)
+          }
+          return updated
+        })
+      }
+
     } catch (e) {
       console.error(e)
       alert('Error ejecutando el modelo')
@@ -143,33 +316,65 @@ function App() {
   }
 
   const runVideoDetection = () => {
-    const video  = videoRef.current
+    const video = videoRef.current
     const canvas = canvasRef.current
+
     if (!video || !canvas) return
 
-    if (animationRef.current) cancelAnimationFrame(animationRef.current)
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current)
+    }
+
     video.play()
     setHasRun(true)
+    resetFpsStats()
 
-    let frameIdx = 0
     let lastDets: Detection[] = []
     let inferring = false
+    let lastInferenceStart = 0
 
     const tick = () => {
-      if (video.ended) { animationRef.current = null; return }
+      if (video.ended) {
+        animationRef.current = null
+        return
+      }
+
+      const now = performance.now()
 
       if (!video.paused) {
-        if (!inferring && frameIdx % 3 === 0 && video.videoWidth > 0) {
+        if (!inferring && (now - lastInferenceStart >= MIN_INFERENCE_INTERVAL) && video.videoWidth > 0) {
           inferring = true
+          lastInferenceStart = now
+
           runInference(video)
-            .then(dets => { lastDets = dets; setDetections(dets) })
+            .then(dets => {
+              setRawDetections(dets)
+              lastDets = dets
+              trackInferenceFps()
+            })
             .catch(() => {})
-            .finally(() => { inferring = false })
+            .finally(() => {
+              inferring = false
+            })
         }
+
         if (video.videoWidth > 0) {
-          drawDetections(canvas, lastDets, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
+          const filtered = lastDets.filter(
+            d =>
+              d.conf >= confRef.current &&
+              visibleClassesRef.current[d.classId]
+          )
+
+          drawDetections(
+            canvas,
+            filtered,
+            video.offsetWidth,
+            video.offsetHeight,
+            video.videoWidth,
+            video.videoHeight,
+            selectedRef.current ?? -1
+          )
         }
-        frameIdx++
       }
 
       animationRef.current = requestAnimationFrame(tick)
@@ -178,16 +383,18 @@ function App() {
     tick()
   }
 
+
   const startWebcam = async () => {
     stopStream()
     setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return '' })
     setSelectedFile('')
     setFileType('')
-    setDetections([])
+    setRawDetections([])
     setHasRun(false)
     setSelectedIdx(null)
     selectedRef.current = null
     setIsWebcam(true)
+    resetFpsStats()
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true })
@@ -206,34 +413,64 @@ function App() {
   const stopWebcam = () => {
     stopStream()
     setIsWebcam(false)
-    setDetections([])
+    setRawDetections([])
     setHasRun(false)
+    setSelectedIdx(null)
+    selectedRef.current = null
   }
 
   const runWebcamLoop = () => {
-    const video  = videoRef.current
+    const video = videoRef.current
     const canvas = canvasRef.current
+
     if (!video || !canvas) return
 
-    let frameIdx = 0
     let lastDets: Detection[] = []
     let inferring = false
+    let lastInferenceStart = 0
 
     const tick = () => {
-      if (!streamRef.current) { animationRef.current = null; return }
+      if (!streamRef.current) {
+        animationRef.current = null
+        return
+      }
 
-      if (!inferring && frameIdx % 3 === 0 && video.videoWidth > 0) {
+      const now = performance.now()
+
+      if (!inferring && (now - lastInferenceStart >= MIN_INFERENCE_INTERVAL) && video.videoWidth > 0) {
         inferring = true
+        lastInferenceStart = now
+
         runInference(video)
-          .then(dets => { lastDets = dets; setDetections(dets) })
+          .then(dets => {
+            setRawDetections(dets)
+            lastDets = dets
+            trackInferenceFps()
+          })
           .catch(() => {})
-          .finally(() => { inferring = false })
-      }
-      if (video.videoWidth > 0) {
-        drawDetections(canvas, lastDets, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
+          .finally(() => {
+            inferring = false
+          })
       }
 
-      frameIdx++
+      if (video.videoWidth > 0) {
+        const filtered = lastDets.filter(
+          d =>
+            d.conf >= confRef.current &&
+            visibleClassesRef.current[d.classId]
+        )
+
+        drawDetections(
+          canvas,
+          filtered,
+          video.offsetWidth,
+          video.offsetHeight,
+          video.videoWidth,
+          video.videoHeight,
+          selectedRef.current ?? -1
+        )
+      }
+
       animationRef.current = requestAnimationFrame(tick)
     }
 
@@ -244,6 +481,123 @@ function App() {
     const next = selectedIdx === i ? null : i
     setSelectedIdx(next)
     selectedRef.current = next
+  }
+
+  const toggleClass = (classId: number) => {
+    setVisibleClasses(prev => ({
+      ...prev,
+      [classId]: !prev[classId]
+    }))
+    setSelectedIdx(null)
+    selectedRef.current = null
+  }
+
+  const clearHistory = () => {
+    setHistory([])
+    try {
+      localStorage.removeItem('logo-history')
+    } catch (e) {
+      console.error('Error limpiando localStorage:', e)
+    }
+  }
+
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => {
+      URL.revokeObjectURL(url)
+    }, 1000)
+  }
+
+  const getBaseFilename = () => {
+    if (!selectedFile) return 'captura'
+    return selectedFile.replace(/\.[^/.]+$/, '')
+  }
+
+  const exportJSON = () => {
+    const data = {
+      file: selectedFile || 'webcam',
+      date: new Date().toISOString(),
+      threshold: confThreshold,
+      detections: detections.map(d => ({
+        class: CLASS_NAMES[d.classId],
+        classId: d.classId,
+        confidence: Number(d.conf.toFixed(4)),
+        box: {
+          x1: Math.round(d.x1),
+          y1: Math.round(d.y1),
+          x2: Math.round(d.x2),
+          y2: Math.round(d.y2)
+        }
+      }))
+    }
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    downloadBlob(blob, `${getBaseFilename()}.json`)
+  }
+
+  const exportCSV = () => {
+    const header = 'class,classId,confidence,x1,y1,x2,y2'
+    const rows = detections.map(d =>
+      [
+        `"${CLASS_NAMES[d.classId]}"`,
+        d.classId,
+        d.conf.toFixed(4),
+        Math.round(d.x1),
+        Math.round(d.y1),
+        Math.round(d.x2),
+        Math.round(d.y2)
+      ].join(',')
+    )
+
+    const csv = [header, ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    downloadBlob(blob, `${getBaseFilename()}.csv`)
+  }
+
+  const exportPNG = async () => {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    let sourceW = 0
+    let sourceH = 0
+    let sourceElement: HTMLImageElement | HTMLVideoElement | null = null
+
+    if (fileType.startsWith('image')) {
+      sourceElement = imageRef.current
+      if (sourceElement instanceof HTMLImageElement) {
+        sourceW = sourceElement.naturalWidth
+        sourceH = sourceElement.naturalHeight
+      }
+    } else {
+      sourceElement = videoRef.current
+      if (sourceElement instanceof HTMLVideoElement) {
+        sourceW = sourceElement.videoWidth
+        sourceH = sourceElement.videoHeight
+      }
+    }
+
+    if (!sourceElement || sourceW === 0 || sourceH === 0) {
+      alert('No hay un elemento de imagen o video activo para exportar.')
+      return
+    }
+
+    canvas.width = sourceW
+    canvas.height = sourceH
+    ctx.drawImage(sourceElement, 0, 0, sourceW, sourceH)
+    drawDetections(canvas, detections, sourceW, sourceH, sourceW, sourceH, -1)
+
+    canvas.toBlob(blob => {
+      if (!blob) return
+      downloadBlob(blob, `${getBaseFilename()}.png`)
+    }, 'image/png')
   }
 
   const showMedia = previewURL || isWebcam
@@ -330,6 +684,12 @@ function App() {
           <div className="results-layout">
             <div className="preview-section">
               <div className="preview-wrapper">
+                {hasRun && (isWebcam || fileType.startsWith('video')) && (
+                  <div className="fps-badge">
+                    NN FPS: {fps}
+                  </div>
+                )}
+
                 {isWebcam ? (
                   <>
                     <video
@@ -363,32 +723,158 @@ function App() {
             </div>
 
             {hasRun && (
-              <aside className="detections-panel">
-                <div className="panel-header">
-                  <span className="panel-title">Detecciones</span>
-                  <span className="panel-count">{detections.length}</span>
+              <>
+                <div className="export-actions">
+                  <button className="btn-export" onClick={exportPNG}>
+                    PNG
+                  </button>
+
+                  <button
+                    className="btn-export"
+                    onClick={exportJSON}
+                    disabled={!detections.length}
+                  >
+                    JSON
+                  </button>
+
+                  <button
+                    className="btn-export"
+                    onClick={exportCSV}
+                    disabled={!detections.length}
+                  >
+                    CSV
+                  </button>
+                </div>
+                
+                <div className="class-filters">
+                  {Object.entries(CLASS_NAMES).map(([key, name]) => {
+                    const classId = Number(key)
+                    return (
+                      <button
+                        key={classId}
+                        className={`class-chip ${
+                          visibleClasses[classId] ? 'active' : 'inactive'
+                        }`}
+                        onClick={() => toggleClass(classId)}
+                      >
+                        <span className="chip-dot" />
+                        {name}
+                      </button>
+                    )
+                  })}
+                </div>
+                
+                <div className="confidence-control">
+                  <label>
+                    Umbral de confianza:
+                    <strong> {(confThreshold * 100).toFixed(0)}%</strong>
+                  </label>
+
+                  <input
+                    type="range"
+                    min="0.05"
+                    max="0.95"
+                    step="0.05"
+                    value={confThreshold}
+                    onChange={(e) =>
+                      setConfThreshold(Number(e.target.value))
+                    }
+                  />
                 </div>
 
-                {detections.length === 0 ? (
-                  <p className="panel-empty">Sin logotipos detectados</p>
-                ) : (
-                  <ul className="detection-list">
-                    {detections.map((d, i) => (
-                      <li
-                        key={i}
-                        className={`detection-item${selectedIdx === i ? ' active' : ''}`}
-                        onClick={() => selectDetection(i)}
-                      >
-                        <span className="detection-class">
-                          {CLASS_NAMES[d.classId] ?? `Clase ${d.classId}`}
-                        </span>
-                        <span className="detection-conf">{(d.conf * 100).toFixed(0)}%</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </aside>
+                <aside className="detections-panel">
+                  <div className="panel-header">
+                    <div className="stats-list">
+                      {classStats.map(stat => (
+                        <div
+                          key={stat.classId}
+                          className="stats-item"
+                        >
+                          <span
+                            className="stats-dot"
+                            style={{
+                              background: CLASS_COLORS[stat.classId] || '#00FF00'
+                            }}
+                          />
+                          <span className="stats-name">
+                            {stat.name}
+                          </span>
+                          <span className="stats-count">
+                            {stat.count}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <span className="panel-title">Detecciones</span>
+                    <span className="panel-count">{detections.length}</span>
+                  </div>
+
+                  {detections.length === 0 ? (
+                    <p className="panel-empty">
+                      Sin logotipos detectados
+                    </p>
+                  ) : (
+                    <ul className="detection-list">
+                      {detections.map((d, i) => (
+                        <li
+                          key={i}
+                          className={`detection-item${
+                            selectedIdx === i ? ' active' : ''
+                          }`}
+                          onClick={() => selectDetection(i)}
+                        >
+                          <span className="detection-class">
+                            {CLASS_NAMES[d.classId] ??
+                              `Clase ${d.classId}`}
+                          </span>
+
+                          <span className="detection-conf">
+                            {(d.conf * 100).toFixed(0)}%
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </aside>
+              </>
             )}
+          </div>
+        )}
+
+        {}
+        {history.length > 0 && (
+          <div className="history-section">
+            <hr className="history-divider" />
+            <div className="history-header">
+              <h2 className="history-title">Historial de Análisis</h2>
+              <button className="btn-clear-history" onClick={clearHistory}>
+                Limpiar Historial
+              </button>
+            </div>
+            <div className="history-grid">
+              {history.map((item) => {
+                
+                const breakdown = Object.entries(item.counts)
+                  .map(([name, qty]) => `${name}: ${qty}`)
+                  .join('\n') || 'Sin detecciones'
+
+                return (
+                  <div 
+                    key={item.id} 
+                    className="history-card" 
+                    title={`Analizado a las ${item.time}\n\nDesglose:\n${breakdown}`}
+                  >
+                    <div className="history-thumb-wrapper">
+                      <img src={item.thumb} alt={item.name} className="history-thumb-img" />
+                    </div>
+                    <div className="history-card-info">
+                      <span className="history-card-name">{item.name}</span>
+                      <span className="history-card-total">Detecciones: {item.total}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
 
