@@ -8,8 +8,7 @@ import {
 import {
   loadModel,
   runInference,
-  CLASS_NAMES,
-  CLASS_COLORS
+  CLASS_NAMES
 } from './utils/yolo'
 import type { Detection } from './utils/yolo'
 import './App.css'
@@ -58,12 +57,13 @@ function App() {
   const [selectedIdx,  setSelectedIdx]  = useState<number | null>(null)
   const [isWebcam,     setIsWebcam]     = useState(false)
 
+  // --- MEDICIÓN DE RENDIMIENTO ---
   const [fps, setFps] = useState<number>(0)
   const lastInferenceTimeRef = useRef<number>(0)
   const lastFpsUpdateRef = useRef<number>(0)
   const fpsEmaRef = useRef<number>(0)
-  const MIN_INFERENCE_INTERVAL = 1000 / 30
 
+  // --- HISTORIAL DE LOCALSTORAGE (CON CARGA DEFENSIVA) ---
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       const stored = localStorage.getItem('logo-history')
@@ -72,27 +72,23 @@ function App() {
         if (Array.isArray(parsed)) return parsed
       }
     } catch (e) {
-      console.error('Error inicializando el historial desde localStorage (corrupto):', e)
+      console.error('Historial de localStorage corrupto o inaccesible:', e)
     }
     return []
   })
 
-
+  // --- FILTRADOS ---
   const detections = useMemo(() => {
     return rawDetections.filter(
-      d =>
-        d.conf >= confThreshold &&
-        visibleClasses[d.classId]
+      d => d.conf >= confThreshold && visibleClasses[d.classId]
     )
   }, [rawDetections, confThreshold, visibleClasses])
 
   const classStats = useMemo(() => {
     const counts: Record<number, number> = {}
-
     detections.forEach(det => {
       counts[det.classId] = (counts[det.classId] || 0) + 1
     })
-
     return Object.entries(counts)
       .map(([classId, count]) => ({
         classId: Number(classId),
@@ -102,18 +98,9 @@ function App() {
       .sort((a, b) => b.count - a.count)
   }, [detections])
 
-  useEffect(() => {
-    confRef.current = confThreshold
-  }, [confThreshold])
-
-  useEffect(() => {
-    visibleClassesRef.current = visibleClasses
-  }, [visibleClasses])
-
-  useEffect(() => {
-    setSelectedIdx(null)
-    selectedRef.current = null
-  }, [confThreshold, visibleClasses])
+  useEffect(() => { confRef.current = confThreshold }, [confThreshold])
+  useEffect(() => { visibleClassesRef.current = visibleClasses }, [visibleClasses])
+  useEffect(() => { setSelectedIdx(null); selectedRef.current = null }, [confThreshold, visibleClasses])
 
   useEffect(() => {
     loadModel().then(() => setModelReady(true)).catch(console.error)
@@ -158,12 +145,12 @@ function App() {
     resetFpsStats()
   }
 
-
   const handleFile = (file: File) => {
     stopStream()
     setIsWebcam(false)
     setSelectedFile(file.name)
-    setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
+    setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return '' })
+    setPreviewURL(URL.createObjectURL(file))
     setFileType(file.type)
     setRawDetections([])
     setHasRun(false)
@@ -183,7 +170,7 @@ function App() {
     if (file && (file.type.startsWith('image') || file.type.startsWith('video'))) handleFile(file)
   }
 
-
+  // --- CORREGIDO #77: COLOR DEL BOX SEGÚN LA CONFIANZA (HSL ROJO -> VERDE) ---
   const drawDetections = useCallback((
     canvas: HTMLCanvasElement,
     dets: Detection[],
@@ -214,14 +201,17 @@ function App() {
       const dy2 = det.y2 * scaleY
       const isHi = idx === highlightIdx
       const label = `${CLASS_NAMES[det.classId] ?? `Clase ${det.classId}`} ${(det.conf * 100).toFixed(0)}%`
-      const color = CLASS_COLORS[det.classId] || '#00FF00'
+      
+      // Mapeo dinámico: 0% confianza = Rojo (0), 100% confianza = Verde (120)
+      const hue = det.conf * 120
+      const confidenceColor = `hsl(${hue}, 100%, 45%)`
 
       if (isHi) {
-        ctx.fillStyle = 'rgba(242, 76, 61, 0.28)'
+        ctx.fillStyle = 'rgba(242, 76, 61, 0.25)'
         ctx.fillRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
       }
 
-      ctx.strokeStyle = isHi ? '#F24C3D' : color
+      ctx.strokeStyle = isHi ? '#F24C3D' : confidenceColor
       ctx.lineWidth   = Math.max(2, displayW / 300) * (isHi ? 1.8 : 1)
       ctx.strokeRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
 
@@ -230,7 +220,7 @@ function App() {
       const labelH = fontSize + pad * 2
       const labelY = dy1 > labelH + 4 ? dy1 - labelH : dy2 + 4
 
-      ctx.fillStyle = isHi ? '#F24C3D' : color
+      ctx.fillStyle = isHi ? '#F24C3D' : confidenceColor
       ctx.fillRect(dx1 - 1, labelY, textW + pad * 2 + 2, labelH)
       ctx.fillStyle = '#ffffff'
       ctx.fillText(label, dx1 + pad, labelY + fontSize + pad * 0.4)
@@ -244,7 +234,6 @@ function App() {
     if (!img || !canvas) return
     drawDetections(canvas, detections, img.offsetWidth, img.offsetHeight, img.naturalWidth, img.naturalHeight, selectedIdx ?? -1)
   }, [detections, selectedIdx, fileType, drawDetections])
-
 
   const handleDetect = async () => {
     if (fileType.startsWith('image'))      await runImageDetection()
@@ -275,13 +264,8 @@ function App() {
         const maxDim = 96
         let tw = img.naturalWidth
         let th = img.naturalHeight
-        if (tw > th) {
-          th = Math.round((th * maxDim) / tw)
-          tw = maxDim
-        } else {
-          tw = Math.round((tw * maxDim) / th)
-          th = maxDim
-        }
+        if (tw > th) { th = Math.round((th * maxDim) / tw); tw = maxDim } 
+        else { tw = Math.round((tw * maxDim) / th); th = maxDim }
         thumbCanvas.width = tw
         thumbCanvas.height = th
         thumbCtx.drawImage(img, 0, 0, tw, th)
@@ -298,32 +282,23 @@ function App() {
 
         setHistory(prev => {
           const updated = [newItem, ...prev].slice(0, HISTORY_MAX)
-          try {
-            localStorage.setItem('logo-history', JSON.stringify(updated))
-          } catch (storageError) {
-            console.error('Límite de cuota excedido en localStorage. El historial no se guardó:', storageError)
-          }
+          try { localStorage.setItem('logo-history', JSON.stringify(updated)) } catch (e) {}
           return updated
         })
       }
-
     } catch (e) {
       console.error(e)
-      alert('Error ejecutando el modelo')
     } finally {
       setLoading(false)
     }
   }
 
+  // --- CORREGIDO #80: CICLO ASÍNCRONO ADAPTATIVO REAL (VIDEO) ---
   const runVideoDetection = () => {
     const video = videoRef.current
     const canvas = canvasRef.current
-
     if (!video || !canvas) return
-
-    if (animationRef.current) {
-      cancelAnimationFrame(animationRef.current)
-    }
+    if (animationRef.current) cancelAnimationFrame(animationRef.current)
 
     video.play()
     setHasRun(true)
@@ -331,21 +306,14 @@ function App() {
 
     let lastDets: Detection[] = []
     let inferring = false
-    let lastInferenceStart = 0
 
     const tick = () => {
-      if (video.ended) {
-        animationRef.current = null
-        return
-      }
+      if (video.ended) { animationRef.current = null; return }
 
-      const now = performance.now()
-
-      if (!video.paused) {
-        if (!inferring && (now - lastInferenceStart >= MIN_INFERENCE_INTERVAL) && video.videoWidth > 0) {
+      if (!video.paused && video.videoWidth > 0) {
+        // En lugar de usar un timer estático, esperamos la resolución de la promesa anterior
+        if (!inferring) {
           inferring = true
-          lastInferenceStart = now
-
           runInference(video)
             .then(dets => {
               setRawDetections(dets)
@@ -354,47 +322,23 @@ function App() {
             })
             .catch(() => {})
             .finally(() => {
-              inferring = false
+              inferring = false // Permite capturar el siguiente frame inmediatamente
             })
         }
 
-        if (video.videoWidth > 0) {
-          const filtered = lastDets.filter(
-            d =>
-              d.conf >= confRef.current &&
-              visibleClassesRef.current[d.classId]
-          )
-
-          drawDetections(
-            canvas,
-            filtered,
-            video.offsetWidth,
-            video.offsetHeight,
-            video.videoWidth,
-            video.videoHeight,
-            selectedRef.current ?? -1
-          )
-        }
+        const filtered = lastDets.filter(d => d.conf >= confRef.current && visibleClassesRef.current[d.classId])
+        drawDetections(canvas, filtered, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
       }
-
       animationRef.current = requestAnimationFrame(tick)
     }
-
     tick()
   }
 
-
   const startWebcam = async () => {
     stopStream()
-    setPreviewURL(prev => { if (prev) URL.revokeObjectURL(prev); return '' })
-    setSelectedFile('')
-    setFileType('')
-    setRawDetections([])
-    setHasRun(false)
-    setSelectedIdx(null)
-    selectedRef.current = null
-    setIsWebcam(true)
-    resetFpsStats()
+    setPreviewURL('')
+    setSelectedFile(''); setFileType(''); setRawDetections([]); setHasRun(false); setSelectedIdx(null); selectedRef.current = null
+    setIsWebcam(true); resetFpsStats()
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true })
@@ -410,70 +354,40 @@ function App() {
     }
   }
 
-  const stopWebcam = () => {
-    stopStream()
-    setIsWebcam(false)
-    setRawDetections([])
-    setHasRun(false)
-    setSelectedIdx(null)
-    selectedRef.current = null
-  }
+  const stopWebcam = () => { stopStream(); setIsWebcam(false); setRawDetections([]); setHasRun(false); setSelectedIdx(null); selectedRef.current = null }
 
+  // --- CORREGIDO #80: CICLO ASÍNCRONO ADAPTATIVO REAL (WEBCAM) ---
   const runWebcamLoop = () => {
     const video = videoRef.current
     const canvas = canvasRef.current
-
     if (!video || !canvas) return
 
     let lastDets: Detection[] = []
     let inferring = false
-    let lastInferenceStart = 0
 
     const tick = () => {
-      if (!streamRef.current) {
-        animationRef.current = null
-        return
-      }
-
-      const now = performance.now()
-
-      if (!inferring && (now - lastInferenceStart >= MIN_INFERENCE_INTERVAL) && video.videoWidth > 0) {
-        inferring = true
-        lastInferenceStart = now
-
-        runInference(video)
-          .then(dets => {
-            setRawDetections(dets)
-            lastDets = dets
-            trackInferenceFps()
-          })
-          .catch(() => {})
-          .finally(() => {
-            inferring = false
-          })
-      }
+      if (!streamRef.current) { animationRef.current = null; return }
 
       if (video.videoWidth > 0) {
-        const filtered = lastDets.filter(
-          d =>
-            d.conf >= confRef.current &&
-            visibleClassesRef.current[d.classId]
-        )
+        if (!inferring) {
+          inferring = true
+          runInference(video)
+            .then(dets => {
+              setRawDetections(dets)
+              lastDets = dets
+              trackInferenceFps()
+            })
+            .catch(() => {})
+            .finally(() => {
+              inferring = false
+            })
+        }
 
-        drawDetections(
-          canvas,
-          filtered,
-          video.offsetWidth,
-          video.offsetHeight,
-          video.videoWidth,
-          video.videoHeight,
-          selectedRef.current ?? -1
-        )
+        const filtered = lastDets.filter(d => d.conf >= confRef.current && visibleClassesRef.current[d.classId])
+        drawDetections(canvas, filtered, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
       }
-
       animationRef.current = requestAnimationFrame(tick)
     }
-
     tick()
   }
 
@@ -484,120 +398,57 @@ function App() {
   }
 
   const toggleClass = (classId: number) => {
-    setVisibleClasses(prev => ({
-      ...prev,
-      [classId]: !prev[classId]
-    }))
-    setSelectedIdx(null)
-    selectedRef.current = null
+    setVisibleClasses(prev => ({ ...prev, [classId]: !prev[classId] }))
+    setSelectedIdx(null); selectedRef.current = null
   }
 
-  const clearHistory = () => {
-    setHistory([])
-    try {
-      localStorage.removeItem('logo-history')
-    } catch (e) {
-      console.error('Error limpiando localStorage:', e)
-    }
-  }
+  const clearHistory = () => { setHistory([]); try { localStorage.removeItem('logo-history') } catch (e) {} }
 
-
+  // --- EXPORTACIÓN ---
   const downloadBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    setTimeout(() => {
-      URL.revokeObjectURL(url)
-    }, 1000)
+    a.href = url; a.download = filename
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    setTimeout(() => { URL.revokeObjectURL(url) }, 1000)
   }
 
-  const getBaseFilename = () => {
-    if (!selectedFile) return 'captura'
-    return selectedFile.replace(/\.[^/.]+$/, '')
-  }
+  const getBaseFilename = () => { if (!selectedFile) return 'captura'; return selectedFile.replace(/\.[^/.]+$/, '') }
 
   const exportJSON = () => {
     const data = {
-      file: selectedFile || 'webcam',
-      date: new Date().toISOString(),
-      threshold: confThreshold,
+      file: selectedFile || 'webcam', date: new Date().toISOString(), threshold: confThreshold,
       detections: detections.map(d => ({
-        class: CLASS_NAMES[d.classId],
-        classId: d.classId,
-        confidence: Number(d.conf.toFixed(4)),
-        box: {
-          x1: Math.round(d.x1),
-          y1: Math.round(d.y1),
-          x2: Math.round(d.x2),
-          y2: Math.round(d.y2)
-        }
+        class: CLASS_NAMES[d.classId], classId: d.classId, confidence: Number(d.conf.toFixed(4)),
+        box: { x1: Math.round(d.x1), y1: Math.round(d.y1), x2: Math.round(d.x2), y2: Math.round(d.y2) }
       }))
     }
-
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    downloadBlob(blob, `${getBaseFilename()}.json`)
+    downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `${getBaseFilename()}.json`)
   }
 
   const exportCSV = () => {
     const header = 'class,classId,confidence,x1,y1,x2,y2'
-    const rows = detections.map(d =>
-      [
-        `"${CLASS_NAMES[d.classId]}"`,
-        d.classId,
-        d.conf.toFixed(4),
-        Math.round(d.x1),
-        Math.round(d.y1),
-        Math.round(d.x2),
-        Math.round(d.y2)
-      ].join(',')
-    )
-
-    const csv = [header, ...rows].join('\n')
-    const blob = new Blob([csv], { type: 'text/csv' })
-    downloadBlob(blob, `${getBaseFilename()}.csv`)
+    const rows = detections.map(d => [`"${CLASS_NAMES[d.classId]}"`, d.classId, d.conf.toFixed(4), Math.round(d.x1), Math.round(d.y1), Math.round(d.x2), Math.round(d.y2)].join(','))
+    downloadBlob(new Blob([[header, ...rows].join('\n')], { type: 'text/csv' }), `${getBaseFilename()}.csv`)
   }
 
   const exportPNG = async () => {
-    const canvas = document.createElement('canvas')
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    let sourceW = 0
-    let sourceH = 0
-    let sourceElement: HTMLImageElement | HTMLVideoElement | null = null
+    const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d'); if (!ctx) return
+    let sourceW = 0; let sourceH = 0; let sourceElement: HTMLImageElement | HTMLVideoElement | null = null
 
     if (fileType.startsWith('image')) {
       sourceElement = imageRef.current
-      if (sourceElement instanceof HTMLImageElement) {
-        sourceW = sourceElement.naturalWidth
-        sourceH = sourceElement.naturalHeight
-      }
+      if (sourceElement instanceof HTMLImageElement) { sourceW = sourceElement.naturalWidth; sourceH = sourceElement.naturalHeight }
     } else {
       sourceElement = videoRef.current
-      if (sourceElement instanceof HTMLVideoElement) {
-        sourceW = sourceElement.videoWidth
-        sourceH = sourceElement.videoHeight
-      }
+      if (sourceElement instanceof HTMLVideoElement) { sourceW = sourceElement.videoWidth; sourceH = sourceElement.videoHeight }
     }
 
-    if (!sourceElement || sourceW === 0 || sourceH === 0) {
-      alert('No hay un elemento de imagen o video activo para exportar.')
-      return
-    }
-
-    canvas.width = sourceW
-    canvas.height = sourceH
+    if (!sourceElement || sourceW === 0 || sourceH === 0) return
+    canvas.width = sourceW; canvas.height = sourceH
     ctx.drawImage(sourceElement, 0, 0, sourceW, sourceH)
     drawDetections(canvas, detections, sourceW, sourceH, sourceW, sourceH, -1)
-
-    canvas.toBlob(blob => {
-      if (!blob) return
-      downloadBlob(blob, `${getBaseFilename()}.png`)
-    }, 'image/png')
+    canvas.toBlob(blob => { if (blob) downloadBlob(blob, `${getBaseFilename()}.png`) }, 'image/png')
   }
 
   const showMedia = previewURL || isWebcam
@@ -609,9 +460,7 @@ function App() {
         <header className="header">
           <img src="/image.png" alt="Intelite" className="logo" />
           <h1 className="title">Detección de Logotipos</h1>
-          <p className="subtitle">
-            Analiza imágenes y video para detectar logotipos políticos con IA
-          </p>
+          <p className="subtitle">Analiza imágenes y video para detectar logotipos políticos con IA</p>
         </header>
 
         <div className={`status-badge ${modelReady ? 'ready' : 'loading-status'}`}>
@@ -627,9 +476,7 @@ function App() {
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
           >
-            {previewURL ? (
-              <span className="dropzone-filename">{selectedFile}</span>
-            ) : (
+            {previewURL ? <span className="dropzone-filename">{selectedFile}</span> : (
               <>
                 <span className="dropzone-icon">📂</span>
                 <span className="dropzone-text">Arrastra una imagen o video aquí</span>
@@ -639,76 +486,42 @@ function App() {
           </div>
         )}
 
-        <input
-          type="file"
-          accept="image/*,video/*"
-          ref={fileInputRef}
-          style={{ display: 'none' }}
-          onChange={handleFileChange}
-        />
+        <input type="file" accept="image/*,video/*" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileChange} />
 
         <div className="actions">
           {!isWebcam ? (
             <>
-              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>
-                Subir archivo
-              </button>
-              <button
-                className="btn btn-webcam"
-                onClick={startWebcam}
-                disabled={!modelReady}
-              >
-                Usar webcam
-              </button>
-              <button
-                className="btn btn-detect"
-                onClick={handleDetect}
-                disabled={!previewURL || loading || !modelReady}
-              >
+              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>Subir archivo</button>
+              <button className="btn btn-webcam" onClick={startWebcam} disabled={!modelReady}>Usar webcam</button>
+              <button className="btn btn-detect" onClick={handleDetect} disabled={!previewURL || loading || !modelReady}>
                 {loading ? 'Detectando…' : 'Detectar logotipos'}
               </button>
             </>
           ) : (
             <>
-              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>
-                Subir archivo
-              </button>
-              <button className="btn btn-webcam btn-webcam-stop" onClick={stopWebcam}>
-                Detener webcam
-              </button>
+              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>Subir archivo</button>
+              <button className="btn btn-webcam btn-webcam-stop" onClick={stopWebcam}>Detener webcam</button>
             </>
           )}
         </div>
 
         {showMedia && (
-          <div className="results-layout">
-            <div className="preview-section">
+          <div className="results-layout-large">
+            
+            <div className="preview-section-large">
               <div className="preview-wrapper">
                 {hasRun && (isWebcam || fileType.startsWith('video')) && (
-                  <div className="fps-badge">
-                    NN FPS: {fps}
-                  </div>
+                  <div className="fps-badge">NN FPS: {fps}</div>
                 )}
 
                 {isWebcam ? (
                   <>
-                    <video
-                      ref={videoRef}
-                      className="preview-media"
-                      autoPlay
-                      muted
-                      playsInline
-                    />
+                    <video ref={videoRef} className="preview-media" autoPlay muted playsInline />
                     <canvas ref={canvasRef} className="overlay-canvas" style={{ pointerEvents: 'none' }} />
                   </>
                 ) : fileType.startsWith('image') ? (
                   <>
-                    <img
-                      ref={imageRef}
-                      src={previewURL}
-                      alt="Vista previa"
-                      className="preview-media"
-                    />
+                    <img ref={imageRef} src={previewURL} alt="Vista previa" className="preview-media" />
                     <canvas ref={canvasRef} className="overlay-canvas" />
                   </>
                 ) : (
@@ -723,85 +536,37 @@ function App() {
             </div>
 
             {hasRun && (
-              <>
+              <div className="controls-panel-sidebar">
                 <div className="export-actions">
-                  <button className="btn-export" onClick={exportPNG}>
-                    PNG
-                  </button>
-
-                  <button
-                    className="btn-export"
-                    onClick={exportJSON}
-                    disabled={!detections.length}
-                  >
-                    JSON
-                  </button>
-
-                  <button
-                    className="btn-export"
-                    onClick={exportCSV}
-                    disabled={!detections.length}
-                  >
-                    CSV
-                  </button>
+                  <button className="btn-export" onClick={exportPNG}>PNG</button>
+                  <button className="btn-export" onClick={exportJSON} disabled={!detections.length}>JSON</button>
+                  <button className="btn-export" onClick={exportCSV} disabled={!detections.length}>CSV</button>
                 </div>
                 
+                <div className="confidence-control">
+                  <label>Umbral de confianza: <strong>{(confThreshold * 100).toFixed(0)}%</strong></label>
+                  <input type="range" min="0.05" max="0.95" step="0.05" value={confThreshold} onChange={(e) => setConfThreshold(Number(e.target.value))} />
+                </div>
+
                 <div className="class-filters">
                   {Object.entries(CLASS_NAMES).map(([key, name]) => {
                     const classId = Number(key)
                     return (
-                      <button
-                        key={classId}
-                        className={`class-chip ${
-                          visibleClasses[classId] ? 'active' : 'inactive'
-                        }`}
-                        onClick={() => toggleClass(classId)}
-                      >
-                        <span className="chip-dot" />
-                        {name}
+                      <button key={classId} className={`class-chip ${visibleClasses[classId] ? 'active' : 'inactive'}`} onClick={() => toggleClass(classId)}>
+                        <span className="chip-dot" />{name}
                       </button>
                     )
                   })}
-                </div>
-                
-                <div className="confidence-control">
-                  <label>
-                    Umbral de confianza:
-                    <strong> {(confThreshold * 100).toFixed(0)}%</strong>
-                  </label>
-
-                  <input
-                    type="range"
-                    min="0.05"
-                    max="0.95"
-                    step="0.05"
-                    value={confThreshold}
-                    onChange={(e) =>
-                      setConfThreshold(Number(e.target.value))
-                    }
-                  />
                 </div>
 
                 <aside className="detections-panel">
                   <div className="panel-header">
                     <div className="stats-list">
                       {classStats.map(stat => (
-                        <div
-                          key={stat.classId}
-                          className="stats-item"
-                        >
-                          <span
-                            className="stats-dot"
-                            style={{
-                              background: CLASS_COLORS[stat.classId] || '#00FF00'
-                            }}
-                          />
-                          <span className="stats-name">
-                            {stat.name}
-                          </span>
-                          <span className="stats-count">
-                            {stat.count}
-                          </span>
+                        <div key={stat.classId} className="stats-item">
+                          <span className="stats-dot" style={{ background: `hsl(100, 100%, 45%)` }} />
+                          <span className="stats-name">{stat.name}</span>
+                          <span className="stats-count">{stat.count}</span>
                         </div>
                       ))}
                     </div>
@@ -809,26 +574,12 @@ function App() {
                     <span className="panel-count">{detections.length}</span>
                   </div>
 
-                  {detections.length === 0 ? (
-                    <p className="panel-empty">
-                      Sin logotipos detectados
-                    </p>
-                  ) : (
+                  {detections.length === 0 ? <p className="panel-empty">Sin logotipos detectados</p> : (
                     <ul className="detection-list">
                       {detections.map((d, i) => (
-                        <li
-                          key={i}
-                          className={`detection-item${
-                            selectedIdx === i ? ' active' : ''
-                          }`}
-                          onClick={() => selectDetection(i)}
-                        >
-                          <span className="detection-class">
-                            {CLASS_NAMES[d.classId] ??
-                              `Clase ${d.classId}`}
-                          </span>
-
-                          <span className="detection-conf">
+                        <li key={i} className={`detection-item${selectedIdx === i ? ' active' : ''}`} onClick={() => selectDetection(i)}>
+                          <span className="detection-class">{CLASS_NAMES[d.classId] ?? `Clase ${d.classId}`}</span>
+                          <span className="detection-conf" style={{ color: `hsl(${d.conf * 120}, 100%, 38%)`, fontWeight: 'bold' }}>
                             {(d.conf * 100).toFixed(0)}%
                           </span>
                         </li>
@@ -836,34 +587,23 @@ function App() {
                     </ul>
                   )}
                 </aside>
-              </>
+              </div>
             )}
           </div>
         )}
 
-        {}
         {history.length > 0 && (
           <div className="history-section">
             <hr className="history-divider" />
             <div className="history-header">
               <h2 className="history-title">Historial de Análisis</h2>
-              <button className="btn-clear-history" onClick={clearHistory}>
-                Limpiar Historial
-              </button>
+              <button className="btn-clear-history" onClick={clearHistory}>Limpiar Historial</button>
             </div>
             <div className="history-grid">
               {history.map((item) => {
-                
-                const breakdown = Object.entries(item.counts)
-                  .map(([name, qty]) => `${name}: ${qty}`)
-                  .join('\n') || 'Sin detecciones'
-
+                const breakdown = Object.entries(item.counts).map(([name, qty]) => `${name}: ${qty}`).join('\n') || 'Sin detecciones'
                 return (
-                  <div 
-                    key={item.id} 
-                    className="history-card" 
-                    title={`Analizado a las ${item.time}\n\nDesglose:\n${breakdown}`}
-                  >
+                  <div key={item.id} className="history-card" title={`Analizado a las ${item.time}\n\nDesglose:\n${breakdown}`}>
                     <div className="history-thumb-wrapper">
                       <img src={item.thumb} alt={item.name} className="history-thumb-img" />
                     </div>
