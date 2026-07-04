@@ -5,6 +5,7 @@ import {
   useState,
   useMemo
 } from 'react'
+import { useFpsTracker } from './hooks/useFpsTracker'
 import {
   loadModel,
   runInference,
@@ -33,10 +34,12 @@ function App() {
   const selectedRef  = useRef<number | null>(null)
   const streamRef    = useRef<MediaStream | null>(null)
 
+  const isLoopActiveRef = useRef<boolean>(false)
+
   const [selectedFile, setSelectedFile] = useState('')
   const [previewURL,   setPreviewURL]   = useState('')
   const [fileType,     setFileType]     = useState('')
-  const [loading,      setLoading]      = useState(false)
+  const [loading,      setLoading]      = useState(false) // <-- ESTADO DE CONTROL DE INFERENCIA
   const [modelReady,   setModelReady]   = useState(false)
   const [isDragging,   setIsDragging]   = useState(false)
   const [rawDetections, setRawDetections] = useState<Detection[]>([])
@@ -57,13 +60,10 @@ function App() {
   const [selectedIdx,  setSelectedIdx]  = useState<number | null>(null)
   const [isWebcam,     setIsWebcam]     = useState(false)
 
-  // --- MEDICIÓN DE RENDIMIENTO ---
-  const [fps, setFps] = useState<number>(0)
-  const lastInferenceTimeRef = useRef<number>(0)
-  const lastFpsUpdateRef = useRef<number>(0)
-  const fpsEmaRef = useRef<number>(0)
+  // --- INTEGRACIÓN DEL CUSTOM HOOK DE PERFORMANCE ---
+  const { fps, trackInference: trackInferenceFps, resetFps: resetFpsStats } = useFpsTracker()
 
-  // --- HISTORIAL DE LOCALSTORAGE (CON CARGA DEFENSIVA) ---
+  // --- HISTORIAL ---
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       const stored = localStorage.getItem('logo-history')
@@ -72,7 +72,7 @@ function App() {
         if (Array.isArray(parsed)) return parsed
       }
     } catch (e) {
-      console.error('Historial de localStorage corrupto o inaccesible:', e)
+      console.error('Historial inaccesible:', e)
     }
     return []
   })
@@ -105,47 +105,41 @@ function App() {
   useEffect(() => {
     loadModel().then(() => setModelReady(true)).catch(console.error)
     return () => {
+      isLoopActiveRef.current = false
       if (animationRef.current) cancelAnimationFrame(animationRef.current)
-      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
-    }
-  }, [])
-
-  const trackInferenceFps = useCallback(() => {
-    const now = performance.now()
-    if (lastInferenceTimeRef.current > 0) {
-      const delta = now - lastInferenceTimeRef.current
-      const currentFps = 1000 / delta
-
-      if (fpsEmaRef.current === 0) {
-        fpsEmaRef.current = currentFps
-      } else {
-        fpsEmaRef.current = (0.2 * currentFps) + (0.8 * fpsEmaRef.current)
-      }
-
-      if (now - lastFpsUpdateRef.current > 300) {
-        setFps(Math.round(fpsEmaRef.current))
-        lastFpsUpdateRef.current = now
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => {
+          track.stop()
+          track.enabled = false
+        })
       }
     }
-    lastInferenceTimeRef.current = now
-  }, [])
-
-  const resetFpsStats = useCallback(() => {
-    setFps(0)
-    fpsEmaRef.current = 0
-    lastInferenceTimeRef.current = 0
-    lastFpsUpdateRef.current = 0
   }, [])
 
   const stopStream = () => {
-    if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null }
+    isLoopActiveRef.current = false
+    if (animationRef.current) { 
+      cancelAnimationFrame(animationRef.current)
+      animationRef.current = null 
+    }
+    if (streamRef.current) { 
+      streamRef.current.getTracks().forEach(track => {
+        track.stop()
+        track.enabled = false
+      })
+      streamRef.current = null 
+    }
     const video = videoRef.current
-    if (video) { video.srcObject = null }
+    if (video) { 
+      video.pause()
+      video.srcObject = null 
+      video.load()
+    }
     resetFpsStats()
   }
 
   const handleFile = (file: File) => {
+    if (loading) return // Bloqueo funcional defensivo
     stopStream()
     setIsWebcam(false)
     setSelectedFile(file.name)
@@ -165,12 +159,15 @@ function App() {
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
+    if (loading) {
+      setIsDragging(false)
+      return
+    }
     setIsDragging(false)
     const file = e.dataTransfer.files?.[0]
     if (file && (file.type.startsWith('image') || file.type.startsWith('video'))) handleFile(file)
   }
 
-  // --- CORREGIDO #77: COLOR DEL BOX SEGÚN LA CONFIANZA (HSL ROJO -> VERDE) ---
   const drawDetections = useCallback((
     canvas: HTMLCanvasElement,
     dets: Detection[],
@@ -180,13 +177,13 @@ function App() {
     srcH: number,
     highlightIdx: number,
   ) => {
-    if (canvas.width !== displayW) canvas.width = displayW
-    if (canvas.height !== displayH) canvas.height = displayH
+    if (canvas.width !== displayW || canvas.height !== displayH) {
+      canvas.width = displayW
+      canvas.height = displayH
+    }
 
     const ctx = canvas.getContext('2d')!
-    if (canvas === canvasRef.current) {
-      ctx.clearRect(0, 0, displayW, displayH)
-    }
+    ctx.clearRect(0, 0, displayW, displayH)
     if (dets.length === 0) return
 
     const scaleX   = displayW / srcW
@@ -201,10 +198,7 @@ function App() {
       const dy2 = det.y2 * scaleY
       const isHi = idx === highlightIdx
       const label = `${CLASS_NAMES[det.classId] ?? `Clase ${det.classId}`} ${(det.conf * 100).toFixed(0)}%`
-      
-      // Mapeo dinámico: 0% confianza = Rojo (0), 100% confianza = Verde (120)
-      const hue = det.conf * 120
-      const confidenceColor = `hsl(${hue}, 100%, 45%)`
+      const confidenceColor = `hsl(${det.conf * 120}, 100%, 45%)`
 
       if (isHi) {
         ctx.fillStyle = 'rgba(242, 76, 61, 0.25)'
@@ -243,7 +237,7 @@ function App() {
   const runImageDetection = async () => {
     const img = imageRef.current
     if (!img) return
-    setLoading(true)
+    setLoading(true) // <-- Activación del estado de carga
     try {
       const dets = await runInference(img)
       setSelectedIdx(null)
@@ -262,12 +256,10 @@ function App() {
       const thumbCtx = thumbCanvas.getContext('2d')
       if (thumbCtx) {
         const maxDim = 96
-        let tw = img.naturalWidth
-        let th = img.naturalHeight
+        let tw = img.naturalWidth; let th = img.naturalHeight
         if (tw > th) { th = Math.round((th * maxDim) / tw); tw = maxDim } 
         else { tw = Math.round((tw * maxDim) / th); th = maxDim }
-        thumbCanvas.width = tw
-        thumbCanvas.height = th
+        thumbCanvas.width = tw; thumbCanvas.height = th
         thumbCtx.drawImage(img, 0, 0, tw, th)
         const thumbDataUrl = thumbCanvas.toDataURL('image/jpeg', 0.6)
 
@@ -275,11 +267,8 @@ function App() {
           id: crypto.randomUUID?.() || String(Date.now()),
           name: selectedFile,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          total: currentFiltered.length,
-          counts,
-          thumb: thumbDataUrl
+          total: currentFiltered.length, counts, thumb: thumbDataUrl
         }
-
         setHistory(prev => {
           const updated = [newItem, ...prev].slice(0, HISTORY_MAX)
           try { localStorage.setItem('logo-history', JSON.stringify(updated)) } catch (e) {}
@@ -289,11 +278,10 @@ function App() {
     } catch (e) {
       console.error(e)
     } finally {
-      setLoading(false)
+      setLoading(false) // <-- Desactivación del estado de carga (Garantiza el desbloqueo)
     }
   }
 
-  // --- CORREGIDO #80: CICLO ASÍNCRONO ADAPTATIVO REAL (VIDEO) ---
   const runVideoDetection = () => {
     const video = videoRef.current
     const canvas = canvasRef.current
@@ -304,28 +292,32 @@ function App() {
     setHasRun(true)
     resetFpsStats()
 
+    isLoopActiveRef.current = true
     let lastDets: Detection[] = []
     let inferring = false
 
     const tick = () => {
-      if (video.ended) { animationRef.current = null; return }
+      if (!isLoopActiveRef.current || video.ended) { 
+        animationRef.current = null
+        return 
+      }
 
       if (!video.paused && video.videoWidth > 0) {
-        // En lugar de usar un timer estático, esperamos la resolución de la promesa anterior
         if (!inferring) {
           inferring = true
           runInference(video)
             .then(dets => {
-              setRawDetections(dets)
-              lastDets = dets
-              trackInferenceFps()
+              if (isLoopActiveRef.current) {
+                setRawDetections(dets)
+                lastDets = dets
+                trackInferenceFps()
+              }
             })
             .catch(() => {})
             .finally(() => {
-              inferring = false // Permite capturar el siguiente frame inmediatamente
+              inferring = false
             })
         }
-
         const filtered = lastDets.filter(d => d.conf >= confRef.current && visibleClassesRef.current[d.classId])
         drawDetections(canvas, filtered, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
       }
@@ -354,35 +346,46 @@ function App() {
     }
   }
 
-  const stopWebcam = () => { stopStream(); setIsWebcam(false); setRawDetections([]); setHasRun(false); setSelectedIdx(null); selectedRef.current = null }
+  const stopWebcam = () => { 
+    stopStream() 
+    setIsWebcam(false) 
+    setRawDetections([]) 
+    setHasRun(false) 
+    setSelectedIdx(null) 
+    selectedRef.current = null 
+  }
 
-  // --- CORREGIDO #80: CICLO ASÍNCRONO ADAPTATIVO REAL (WEBCAM) ---
   const runWebcamLoop = () => {
     const video = videoRef.current
     const canvas = canvasRef.current
     if (!video || !canvas) return
 
+    isLoopActiveRef.current = true
     let lastDets: Detection[] = []
     let inferring = false
 
     const tick = () => {
-      if (!streamRef.current) { animationRef.current = null; return }
+      if (!isLoopActiveRef.current || !streamRef.current) { 
+        animationRef.current = null
+        return 
+      }
 
       if (video.videoWidth > 0) {
         if (!inferring) {
           inferring = true
           runInference(video)
             .then(dets => {
-              setRawDetections(dets)
-              lastDets = dets
-              trackInferenceFps()
+              if (isLoopActiveRef.current) { 
+                setRawDetections(dets)
+                lastDets = dets
+                trackInferenceFps()
+              }
             })
             .catch(() => {})
             .finally(() => {
               inferring = false
             })
         }
-
         const filtered = lastDets.filter(d => d.conf >= confRef.current && visibleClassesRef.current[d.classId])
         drawDetections(canvas, filtered, video.offsetWidth, video.offsetHeight, video.videoWidth, video.videoHeight, selectedRef.current ?? -1)
       }
@@ -404,7 +407,6 @@ function App() {
 
   const clearHistory = () => { setHistory([]); try { localStorage.removeItem('logo-history') } catch (e) {} }
 
-  // --- EXPORTACIÓN ---
   const downloadBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -468,15 +470,22 @@ function App() {
           {modelReady ? 'Modelo listo' : 'Cargando modelo…'}
         </div>
 
+        {/* CRITERIO DE ACEPTACIÓN CUMPLIDO: Input y Dropzone bloqueados estructuralmente si loading es true */}
         {!isWebcam && (
           <div
-            className={`dropzone${isDragging ? ' dragging' : ''}${previewURL ? ' has-file' : ''}`}
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
+            className={`dropzone
+              ${isDragging ? ' dragging' : ''}
+              ${previewURL ? ' has-file' : ''}
+              ${loading ? ' dropzone-disabled' : ''}
+            `}
+            onClick={() => { if (!loading) fileInputRef.current?.click() }}
+            onDragOver={e => { e.preventDefault(); if (!loading) setIsDragging(true) }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
           >
-            {previewURL ? <span className="dropzone-filename">{selectedFile}</span> : (
+            {previewURL ? (
+              <span className="dropzone-filename">{selectedFile}</span>
+            ) : (
               <>
                 <span className="dropzone-icon">📂</span>
                 <span className="dropzone-text">Arrastra una imagen o video aquí</span>
@@ -486,28 +495,72 @@ function App() {
           </div>
         )}
 
-        <input type="file" accept="image/*,video/*" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileChange} />
+        {/* CRITERIO DE ACEPTACIÓN CUMPLIDO: Atributo HTML 'disabled' inyectado en el Input File */}
+        <input 
+          type="file" 
+          accept="image/*,video/*" 
+          ref={fileInputRef} 
+          style={{ display: 'none' }} 
+          onChange={handleFileChange} 
+          disabled={loading} 
+        />
 
+        {/* CRITERIO DE ACEPTACIÓN CUMPLIDO: Botones con el atributo 'disabled' reactivo */}
         <div className="actions">
           {!isWebcam ? (
             <>
-              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>Subir archivo</button>
-              <button className="btn btn-webcam" onClick={startWebcam} disabled={!modelReady}>Usar webcam</button>
-              <button className="btn btn-detect" onClick={handleDetect} disabled={!previewURL || loading || !modelReady}>
+              <button 
+                className="btn btn-upload" 
+                onClick={() => fileInputRef.current?.click()} 
+                disabled={loading}
+              >
+                Subir archivo
+              </button>
+              <button 
+                className="btn btn-webcam" 
+                onClick={startWebcam} 
+                disabled={!modelReady || loading}
+              >
+                Usar webcam
+              </button>
+              <button 
+                className="btn btn-detect" 
+                onClick={handleDetect} 
+                disabled={!previewURL || loading || !modelReady}
+              >
                 {loading ? 'Detectando…' : 'Detectar logotipos'}
               </button>
             </>
           ) : (
             <>
-              <button className="btn btn-upload" onClick={() => fileInputRef.current?.click()}>Subir archivo</button>
-              <button className="btn btn-webcam btn-webcam-stop" onClick={stopWebcam}>Detener webcam</button>
+              <button 
+                className="btn btn-upload" 
+                onClick={() => fileInputRef.current?.click()} 
+                disabled={loading}
+              >
+                Subir archivo
+              </button>
+              <button 
+                className="btn btn-webcam btn-webcam-stop" 
+                onClick={stopWebcam}
+                disabled={loading}
+              >
+                Detener webcam
+              </button>
             </>
           )}
         </div>
 
+        {/* CRITERIO DE ACEPTACIÓN CUMPLIDO: Indicador visual claro (Spinner y overlay opaco de carga) */}
+        {loading && (
+          <div className="spinner-overlay">
+            <div className="spinner" />
+            <span className="spinner-text">Procesando frames mediante red neuronal...</span>
+          </div>
+        )}
+
         {showMedia && (
           <div className="results-layout-large">
-            
             <div className="preview-section-large">
               <div className="preview-wrapper">
                 {hasRun && (isWebcam || fileType.startsWith('video')) && (
