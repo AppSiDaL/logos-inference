@@ -1,4 +1,4 @@
 {
-  "modelName": "best_nano.onnx",
-  "expectedSha256": "8f9c2d3e4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d"
+  "model": "best.onnx",
+  "sha256": "8c6fab6e9442b1e36d5ab626021777bebcd44051d8280007233ce7a0060ce464"
 }
