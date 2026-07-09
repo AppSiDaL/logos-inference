@@ -1,4 +1,4 @@
 {
-  "model": "best.onnx",
+  "model": "best_nano.onnx",
   "sha256": "8c6fab6e9442b1e36d5ab626021777bebcd44051d8280007233ce7a0060ce464"
 }
